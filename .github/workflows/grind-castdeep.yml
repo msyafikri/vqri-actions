@@ -47,7 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build grinder
-        run: gcc -O3 -pthread -o castdeep grinder/castdeep_gh.c
+        run: gcc -O3 -march=native -pthread -o castdeep grinder/castdeep_gh.c
       - name: Grind shard ${{ matrix.shard }}
         env:
           CHALLENGE: ${{ inputs.challenge }}
