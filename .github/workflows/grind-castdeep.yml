@@ -1,0 +1,71 @@
+name: grind-castdeep
+on:
+  workflow_dispatch:
+    inputs:
+      challenge:
+        description: "Challenge bytes32 hex (no 0x)"
+        required: true
+        type: string
+      bits:
+        description: "Target leading zero bits (stop when reached)"
+        required: true
+        default: "34"
+        type: string
+      shards:
+        description: "Parallel shards (1-20)"
+        required: true
+        default: "20"
+        type: string
+      minutes:
+        description: "Per-shard grind budget in minutes"
+        required: true
+        default: "10"
+        type: string
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+      count: ${{ steps.m.outputs.count }}
+    steps:
+      - id: m
+        run: |
+          python3 - <<'PY'
+          import json, os
+          n = max(1, min(20, int("${{ inputs.shards }}")))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps({"shard": list(range(n))}) + "\n")
+              f.write("count=" + str(n) + "\n")
+          PY
+  grind:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build grinder
+        run: gcc -O3 -pthread -o castdeep grinder/castdeep_gh.c
+      - name: Grind shard ${{ matrix.shard }}
+        env:
+          CHALLENGE: ${{ inputs.challenge }}
+          BITS: ${{ inputs.bits }}
+          MINUTES: ${{ inputs.minutes }}
+          SHARDS: ${{ needs.plan.outputs.count }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          START=$(( SHARD * 4 ))
+          STEP=$(( SHARDS * 4 ))
+          SECONDS=$(( MINUTES * 60 ))
+          echo "shard $SHARD/$SHARDS start=$START step=$STEP seconds=$SECONDS"
+          timeout "${MINUTES}m" ./castdeep "$CHALLENGE" "$BITS" 4 $START $STEP $SECONDS > result.txt || true
+          cat result.txt || true
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: castdeep-${{ matrix.shard }}
+          path: result.txt
+          if-no-files-found: ignore
