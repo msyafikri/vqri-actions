@@ -26,6 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.m.outputs.matrix }}
+      count: ${{ steps.m.outputs.count }}
     steps:
       - id: m
         run: |
@@ -34,6 +35,7 @@ jobs:
           n = max(1, min(20, int("${{ inputs.shards }}")))
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write("matrix=" + json.dumps({"shard": list(range(n))}) + "\n")
+              f.write("count=" + str(n) + "\n")
           PY
   grind:
     needs: plan
@@ -47,12 +49,17 @@ jobs:
       - name: Build grinder
         run: gcc -O3 -pthread -o tail grinder/tail_gh.c
       - name: Grind shard ${{ matrix.shard }}
+        env:
+          PREFIX: ${{ inputs.prefix }}
+          BITS: ${{ inputs.bits }}
+          MINUTES: ${{ inputs.minutes }}
+          SHARDS: ${{ needs.plan.outputs.count }}
+          SHARD: ${{ matrix.shard }}
         run: |
-          SHARDS=$(python3 -c "import json;print(len(json.loads('${{ needs.plan.outputs.matrix }}')['shard']))")
-          START=$(( ${{ matrix.shard }} * 4 ))
+          START=$(( SHARD * 4 ))
           STEP=$(( SHARDS * 4 ))
-          echo "shard ${{ matrix.shard }}/$SHARDS start=$START step=$STEP"
-          timeout ${{ inputs.minutes }}m ./tail "${{ inputs.prefix }}" "${{ inputs.bits }}" 4 $START $STEP > result.json || true
+          echo "shard $SHARD/$SHARDS start=$START step=$STEP"
+          timeout "${MINUTES}m" ./tail "$PREFIX" "$BITS" 4 $START $STEP > result.json || true
           cat result.json || true
       - name: Upload result
         if: always()
