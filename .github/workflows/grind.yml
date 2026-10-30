@@ -1,0 +1,63 @@
+name: grind
+on:
+  workflow_dispatch:
+    inputs:
+      prefix:
+        description: "String prefix ending in ':' — nonce is appended"
+        required: true
+        type: string
+      bits:
+        description: "Leading zero bits required"
+        required: true
+        default: "35"
+        type: string
+      shards:
+        description: "Parallel shards (1-20)"
+        required: true
+        default: "20"
+        type: string
+      minutes:
+        description: "Per-shard time budget in minutes"
+        required: true
+        default: "55"
+        type: string
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: |
+          python3 - <<'PY'
+          import json, os
+          n = max(1, min(20, int("${{ inputs.shards }}")))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps({"shard": list(range(n))}) + "\n")
+          PY
+  grind:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build grinder
+        run: gcc -O3 -pthread -o tail grinder/tail_gh.c
+      - name: Grind shard ${{ matrix.shard }}
+        run: |
+          SHARDS=$(python3 -c "import json;print(len(json.loads('${{ needs.plan.outputs.matrix }}')['shard']))")
+          START=$(( ${{ matrix.shard }} * 4 ))
+          STEP=$(( SHARDS * 4 ))
+          echo "shard ${{ matrix.shard }}/$SHARDS start=$START step=$STEP"
+          timeout ${{ inputs.minutes }}m ./tail "${{ inputs.prefix }}" "${{ inputs.bits }}" 4 $START $STEP > result.json || true
+          cat result.json || true
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grind-${{ matrix.shard }}
+          path: result.json
+          if-no-files-found: ignore
