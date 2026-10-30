@@ -1,0 +1,53 @@
+name: solve
+on:
+  workflow_dispatch:
+    inputs:
+      time_limit:
+        description: "Per-shard solver budget in seconds"
+        required: true
+        default: "1500"
+        type: string
+      shards:
+        description: "Parallel shards (1-20), each a different seed"
+        required: true
+        default: "20"
+        type: string
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: |
+          python3 - <<'PY'
+          import json, os
+          n = max(1, min(20, int("${{ inputs.shards }}")))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps({"shard": list(range(n))}) + "\n")
+          PY
+  solve:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Solve shard ${{ matrix.shard }}
+        run: |
+          ls -la solver/inbox/
+          timeout 1800 python3 solver/solvd_solver_par.py solver/inbox/challenge.json out.json \
+            --time-limit "${{ inputs.time_limit }}" --workers 4 --seed "${{ matrix.shard }}" \
+            --report report.json || true
+          cat report.json || true
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: solve-${{ matrix.shard }}
+          path: |
+            out.json
+            report.json
+          if-no-files-found: ignore
