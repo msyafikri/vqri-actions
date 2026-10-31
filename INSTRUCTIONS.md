@@ -34,7 +34,7 @@ Versi konsolidasi satu-satunya. Kalau ada catatan lama yang bertentangan, versi 
 23. Posisi HOLD tetap HOLD: Hash21 nggak pernah di-claim (lapor ambang 2/4/7/10), $BINER report-only.
 
 ## E. Perburuan
-24. 4 kriteria: (1) NFT wajib ada rarity atau harga/nilai riil; (2) airdrop token wajib mcap/likuiditas > 0; (3) NFT bertier rarity diutamakan; (4) token wajib backing/funding jelas.
+24. Syarat lapor perburuan ADA 3 (update user 2026-10-31 ~17:57): (1) cek menyeluruh sudah dilakukan; (2) free mint — benar-benar gratis, gas doang; (3) berpotensi = ada rarity ATAU market/harga riil (rarity + market dihitung SATU syarat gabungan). Cukup penuhi 1 dari 3 → WAJIB kabarin user; user yang memutuskan. Yang utama: cek menyeluruh + free mint. Potensi BUKAN gerbang lapor — dilarang nge-judge / nge-skip temuan sendiri sebelum dilaporin ke user.
 25. Daftar skip permanen: proyek yang udah ditolak user / sold out / butuh modal (UMBRA, JAGENT, CLAUDE, AGENT, LuckyCats, CyberRonin, Black Hole, BLOB, SnakeID-paid, dll — daftar lengkapnya di memory) nggak pernah ditawarkan ulang.
 26. X lagi rate-limited → perburuan jalan dari semua sumber (Square, Substack, Odaily, thecolony, web) + free-mint-watch 3 jam.
 
