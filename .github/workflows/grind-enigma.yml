@@ -1,0 +1,71 @@
+name: grind-enigma
+on:
+  workflow_dispatch:
+    inputs:
+      bits:
+        description: "Target leading zero bits (stop when reached)"
+        required: true
+        default: "34"
+        type: string
+      shards:
+        description: "Parallel shards (1-20)"
+        required: true
+        default: "20"
+        type: string
+      minutes:
+        description: "Per-shard grind budget in minutes"
+        required: true
+        default: "8"
+        type: string
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+      count: ${{ steps.m.outputs.count }}
+    steps:
+      - id: m
+        run: |
+          python3 - <<'PY'
+          import json, os
+          n = max(1, min(20, int("${{ inputs.shards }}")))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps({"shard": list(range(n))}) + "\n")
+              f.write("count=" + str(n) + "\n")
+          PY
+  grind:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build grinder
+        run: gcc -O3 -march=native -pthread -o enigma grinder/enigma_gh.c
+      - name: Self-test
+        run: |
+          H=$(./enigma 0)
+          echo "hash(nonce=0)=$H"
+          test "$H" = "1de4d642f94192d63a6f4aabc18e5d9cdf5d22b8006ea57b5c2999d0a2c8f94f"
+      - name: Grind shard ${{ matrix.shard }}
+        env:
+          BITS: ${{ inputs.bits }}
+          MINUTES: ${{ inputs.minutes }}
+          SHARDS: ${{ needs.plan.outputs.count }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          START=$(( SHARD * 4 ))
+          STEP=$(( SHARDS * 4 ))
+          SECONDS=$(( MINUTES * 60 ))
+          echo "shard $SHARD/$SHARDS start=$START step=$STEP seconds=$SECONDS"
+          timeout "${MINUTES}m" ./enigma "$BITS" 4 $START $STEP $SECONDS > result.txt || true
+          cat result.txt || true
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: enigma-${{ matrix.shard }}
+          path: result.txt
+          if-no-files-found: ignore
