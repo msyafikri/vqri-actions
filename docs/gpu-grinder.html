@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChipArt GPU Grinder — vqri</title>
+<style>
+  body { font-family: system-ui, sans-serif; background:#0b0e14; color:#e6e6e6; margin:0; padding:16px; }
+  h1 { font-size:20px; margin:4px 0 8px; }
+  .card { background:#151a24; border:1px solid #263049; border-radius:12px; padding:14px; margin:10px 0; }
+  .big { font-size:28px; font-weight:700; }
+  button { background:#f5b942; color:#111; border:0; border-radius:10px; padding:12px 18px; font-size:16px; font-weight:700; width:100%; margin:6px 0; }
+  button.stop { background:#e5534b; color:#fff; }
+  button.copy { background:#2f81f7; color:#fff; }
+  input { background:#0b0e14; color:#e6e6e6; border:1px solid #263049; border-radius:8px; padding:8px; font-size:16px; width:80px; }
+  .mono { font-family: ui-monospace, monospace; word-break: break-all; }
+  .muted { color:#9aa4b2; font-size:13px; }
+  #found { display:none; background:#12351c; border:1px solid #2ea043; }
+  #err { display:none; background:#3d1417; border:1px solid #e5534b; }
+  .row { display:flex; justify-content:space-between; margin:4px 0; }
+</style>
+</head>
+<body>
+<h1>⛏️ ChipArt GPU Grinder</h1>
+<p class="muted">Giling nonce PoW ChipArt (CHIP404) pakai GPU device ini, buat wallet <span class="mono">0xfa0C…Ce31f</span> (vqri.ai). Nonce yang kena TIDAK bisa dipakai orang lain — terikat ke alamat ini. Mint-nya tetap ditembak Muse dari wallet Agentic.</p>
+
+<div class="card" id="err"></div>
+
+<div class="card">
+  <div class="row"><span>Target bits (weight live)</span><span class="mono" id="liveWeight">memuat…</span></div>
+  <div class="row"><span>Total minted</span><span class="mono" id="liveMinted">-</span></div>
+  <div class="row"><span>Target giling</span><span><input id="target" type="number" value="45" min="40" max="60"> bits</span></div>
+</div>
+
+<div class="card">
+  <div class="row"><span>Status</span><span id="status">siap</span></div>
+  <div class="row"><span>Kecepatan</span><span class="big" id="rate">0 MH/s</span></div>
+  <div class="row"><span>Total hash dicoba</span><span class="mono" id="total">0</span></div>
+  <div class="row"><span>Terbaik sejauh ini</span><span class="mono" id="best">- bits</span></div>
+  <button id="btnStart">▶ MULAI GILING</button>
+  <button id="btnStop" class="stop" style="display:none">■ STOP</button>
+  <p class="muted">Biarkan tab ini di depan & layar nyala. HP bisa panas — colok charger. Jangan kunci layar.</p>
+</div>
+
+<div class="card" id="found">
+  <div>🎉 NONCE KENA!</div>
+  <div class="big mono" id="foundNonce">-</div>
+  <div class="mono" id="foundBits">-</div>
+  <button class="copy" id="btnCopy">📋 COPY NONCE</button>
+  <p class="muted">Tempel nonce itu ke chat WhatsApp Muse — langsung ditembak dari wallet Agentic. Nonce tetap valid selama weight belum naik melewati bits-nya, jadi kirim SECEPATNYA.</p>
+</div>
+
+<p class="muted" id="selftest">self-test: …</p>
+
+<script>
+"use strict";
+const WALLET = "0xfa0C48F3a5B10aBE43aF895d241E092888Bce31f";
+const CONTRACT = "0xAB6b18C626daaDd1ff7Cc45F402141153a5a9759";
+const SALT_HEX = "445aa0838438a376563c290a2c15cf7ddea0883854555b68b0e01efefafff39a";
+const $ = id => document.getElementById(id);
+
+/* ---------- JS Keccak-256 (BigInt) — buat verifikasi & self-test ---------- */
+const RC = [0x0000000000000001n,0x0000000000008082n,0x800000000000808an,0x8000000080008000n,0x000000000000808bn,0x0000000080000001n,0x8000000080008081n,0x8000000000008009n,0x000000000000008an,0x0000000000000088n,0x0000000080008009n,0x000000008000000an,0x000000008000808bn,0x800000000000008bn,0x8000000000008089n,0x8000000000008003n,0x8000000000008002n,0x8000000000000080n,0x000000000000800an,0x800000008000000an,0x8000000080008081n,0x8000000000008080n,0x0000000080000001n,0x8000000080008008n];
+const ROT = [[0,36,3,41,18],[1,44,10,45,2],[62,6,43,15,61],[28,55,25,21,56],[27,20,39,8,14]];
+const M64 = (1n<<64n)-1n;
+function rotl(v,n){ if(n===0) return v; const s=BigInt(n); return ((v<<s)|(v>>(64n-s)))&M64; }
+function keccakF(A){
+  for(let r=0;r<24;r++){
+    const C=[],D=[];
+    for(let x=0;x<5;x++) C[x]=A[x]^A[x+5]^A[x+10]^A[x+15]^A[x+20];
+    for(let x=0;x<5;x++) D[x]=C[(x+4)%5]^rotl(C[(x+1)%5],1);
+    for(let x=0;x<5;x++) for(let y=0;y<5;y++) A[x+5*y]^=D[x];
+    const B=new Array(25).fill(0n);
+    for(let x=0;x<5;x++) for(let y=0;y<5;y++) B[y+5*((2*x+3*y)%5)]=rotl(A[x+5*y],ROT[x][y]);
+    for(let x=0;x<5;x++) for(let y=0;y<5;y++) A[x+5*y]=B[x+5*y]^((~B[(x+1)%5+5*y])&B[(x+2)%5+5*y]);
+    A[0]^=RC[r];
+  }
+}
+function hexToBytes(h){ const b=new Uint8Array(h.length/2); for(let i=0;i<b.length;i++) b[i]=parseInt(h.substr(2*i,2),16); return b; }
+function keccak256(bytes){
+  const rate=136, A=new Array(25).fill(0n);
+  const block=new Uint8Array(rate); block.set(bytes); block[bytes.length]|=0x01; block[rate-1]|=0x80;
+  for(let i=0;i<rate;i+=8){ let v=0n; for(let j=7;j>=0;j--) v=(v<<8n)|BigInt(block[i+j]); A[i/8]=v; }
+  keccakF(A);
+  const out=new Uint8Array(32);
+  for(let i=0;i<32;i+=8){ let v=A[i/8]; for(let j=0;j<8;j++){ out[i+j]=Number(v&0xffn); v>>=8n; } }
+  return out;
+}
+function chipHash(nonce){ // nonce: BigInt
+  const payload=new Uint8Array(84);
+  payload.set(hexToBytes(SALT_HEX),0);
+  payload.set(hexToBytes(WALLET.slice(2)),32);
+  let n=nonce; const be=new Uint8Array(32);
+  for(let i=31;i>=0;i--){ be[i]=Number(n&0xffn); n>>=8n; }
+  payload.set(be,52);
+  return keccak256(payload);
+}
+function leadBits(h){ let b=0; for(const byte of h){ if(byte===0){ b+=8; } else { b+=Math.clz32(byte)-24; break; } } return b; }
+function toHex(b){ return [...b].map(x=>x.toString(16).padStart(2,"0")).join(""); }
+
+/* self-test vs python keccak (KAT) */
+(function(){
+  const t0=toHex(chipHash(0n)), t1=toHex(chipHash(12345n));
+  const ok = t0==="5748ce358e14d0f512143349e34e31e793bfb3b66f2a8502bbb8c861d2fa7a2a" && t1==="0c12add8cd9af030d31df76ae4f39ef68e0244e6a8eb5ebc0ed1b8e44bcdd578";
+  $("selftest").textContent = "self-test keccak: " + (ok ? "✅ LOLOS (mesin hash halaman ini benar)" : "❌ GAGAL — jangan pakai halaman ini, kabari Muse");
+  window.__katOk = ok;
+})();
+
+/* ---------- weight live dari BSC RPC ---------- */
+async function fetchLive(){
+  try{
+    const body=JSON.stringify({jsonrpc:"2.0",id:1,method:"eth_call",params:[{to:CONTRACT,data:"0x0a954472"},"latest"]});
+    const r=await fetch("https://bsc-dataseed.binance.org",{method:"POST",headers:{"Content-Type":"application/json"},body});
+    const j=await r.json(); const w=parseInt(j.result,16);
+    const body2=JSON.stringify({jsonrpc:"2.0",id:1,method:"eth_call",params:[{to:CONTRACT,data:"0xa2309ff8"},"latest"]});
+    const r2=await fetch("https://bsc-dataseed.binance.org",{method:"POST",headers:{"Content-Type":"application/json"},body:body2});
+    const j2=await r2.json(); const m=parseInt(j2.result,16);
+    $("liveWeight").textContent = w+" bits"; $("liveMinted").textContent = m+" / 3000";
+    const t=$("target"); if(parseInt(t.value)<w) t.value=w;
+    return w;
+  }catch(e){ $("liveWeight").textContent="(gagal ambil — target manual)"; return null; }
+}
+fetchLive(); setInterval(fetchLive, 60000);
+</script>
+
+<script>
+"use strict";
+/* ---------- WebGPU grinder ---------- */
+const WGSL = `
+struct OutBuf { flag: atomic<u32>, foundLo: u32, foundHi: u32, foundBits: u32, bestBits: atomic<u32>, bestLo: u32, bestHi: u32, pad: u32 }
+struct Uni { baseLo: u32, baseHi: u32, target: u32, pad: u32 }
+@group(0) @binding(0) var<uniform> U: Uni;
+@group(0) @binding(1) var<storage, read_write> O: OutBuf;
+const RC: array<vec2<u32>,24> = array<vec2<u32>,24>(
+ vec2<u32>(0x00000001u,0x00000000u), vec2<u32>(0x00008082u,0x00000000u), vec2<u32>(0x0000808au,0x80000000u), vec2<u32>(0x80008000u,0x80000000u),
+ vec2<u32>(0x0000808bu,0x00000000u), vec2<u32>(0x80000001u,0x00000000u), vec2<u32>(0x80008081u,0x80000000u), vec2<u32>(0x00008009u,0x80000000u),
+ vec2<u32>(0x0000008au,0x00000000u), vec2<u32>(0x00000088u,0x00000000u), vec2<u32>(0x80008009u,0x00000000u), vec2<u32>(0x8000000au,0x00000000u),
+ vec2<u32>(0x8000808bu,0x00000000u), vec2<u32>(0x0000008bu,0x80000000u), vec2<u32>(0x00008089u,0x80000000u), vec2<u32>(0x00008003u,0x80000000u),
+ vec2<u32>(0x80008002u,0x80000000u), vec2<u32>(0x00000080u,0x80000000u), vec2<u32>(0x0000800au,0x00000000u), vec2<u32>(0x8000000au,0x80000000u),
+ vec2<u32>(0x80008081u,0x80000000u), vec2<u32>(0x00008080u,0x80000000u), vec2<u32>(0x80000001u,0x00000000u), vec2<u32>(0x80008008u,0x80000000u));
+const ROT: array<u32,25> = array<u32,25>(0u,1u,62u,28u,27u, 36u,44u,6u,55u,20u, 3u,10u,43u,25u,39u, 41u,45u,15u,21u,8u, 18u,2u,61u,56u,14u);
+fn rot(v: vec2<u32>, n: u32) -> vec2<u32> {
+  if (n == 0u) { return v; }
+  if (n == 32u) { return vec2<u32>(v.y, v.x); }
+  if (n < 32u) { return vec2<u32>((v.x << n) | (v.y >> (32u - n)), (v.y << n) | (v.x >> (32u - n))); }
+  let m = n - 32u;
+  return vec2<u32>((v.y << m) | (v.x >> (32u - m)), (v.x << m) | (v.y >> (32u - m)));
+}
+fn bswap(v: u32) -> u32 { return ((v >> 24u) & 0xffu) | ((v >> 8u) & 0xff00u) | ((v << 8u) & 0xff0000u) | (v << 24u); }
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let idx = gid.x;
+  let lo = U.baseLo + idx;
+  let carry = select(0u, 1u, lo < U.baseLo);
+  let hi = U.baseHi + carry;
+  var a: array<vec2<u32>, 25>;
+  a[0] = vec2<u32>(0x83a05a44u, 0x76a33884u);
+  a[1] = vec2<u32>(0x0a293c56u, 0x7dcf152cu);
+  a[2] = vec2<u32>(0x3888a0deu, 0x685b5554u);
+  a[3] = vec2<u32>(0xfe1ee0b0u, 0x9af3fffau);
+  a[4] = vec2<u32>(0xf3480cfau, 0xbe0ab1a5u);
+  a[5] = vec2<u32>(0x5d89af43u, 0x28091e24u);
+  a[6] = vec2<u32>(0x1fe3bc88u, 0u);
+  a[9] = vec2<u32>(0u, bswap(hi));
+  a[10] = vec2<u32>(bswap(lo), 1u);
+  a[16] = vec2<u32>(0u, 0x80000000u);
+  for (var rnd: u32 = 0u; rnd < 24u; rnd++) {
+    var c: array<vec2<u32>, 5>;
+    for (var x: u32 = 0u; x < 5u; x++) { c[x] = a[x] ^ a[x + 5u] ^ a[x + 10u] ^ a[x + 15u] ^ a[x + 20u]; }
+    for (var x: u32 = 0u; x < 5u; x++) {
+      let d = c[(x + 4u) % 5u] ^ rot(c[(x + 1u) % 5u], 1u);
+      for (var y: u32 = 0u; y < 5u; y++) { a[x + 5u * y] = a[x + 5u * y] ^ d; }
+    }
+    var b: array<vec2<u32>, 25>;
+    for (var x: u32 = 0u; x < 5u; x++) {
+      for (var y: u32 = 0u; y < 5u; y++) { b[y + 5u * ((2u * x + 3u * y) % 5u)] = rot(a[x + 5u * y], ROT[x + 5u * y]); }
+    }
+    for (var x: u32 = 0u; x < 5u; x++) {
+      for (var y: u32 = 0u; y < 5u; y++) { a[x + 5u * y] = b[x + 5u * y] ^ ((~b[(x + 1u) % 5u + 5u * y]) & b[(x + 2u) % 5u + 5u * y]); }
+    }
+    a[0] = a[0] ^ RC[rnd];
+  }
+  var bits: u32 = 0u;
+  var done = false;
+  for (var i: u32 = 0u; i < 32u; i++) {
+    if (done) { break; }
+    let lane = a[i >> 3u];
+    let w = select(lane.x, lane.y, (i & 4u) != 0u);
+    let byte = (w >> (8u * (i & 3u))) & 0xffu;
+    if (byte == 0u) { bits += 8u; } else { bits += countLeadingZeros(byte) - 24u; done = true; }
+  }
+  if (bits > 0u) {
+    let prev = atomicMax(&O.bestBits, bits);
+    if (bits >= prev) { O.bestLo = lo; O.bestHi = hi; }
+  }
+  if (bits >= U.target) {
+    let ex = atomicCompareExchangeWeak(&O.flag, 0u, 1u);
+    if (ex.exchanged) { O.foundLo = lo; O.foundHi = hi; O.foundBits = bits; }
+  }
+}`;
+
+let running = false, device = null, totalHashes = 0n, sessionBest = 0;
+const BATCH_WG = 16384, WG_SIZE = 256;
+
+function showErr(msg){ const e=$("err"); e.style.display="block"; e.innerHTML=msg; }
+function fmt(n){ return n.toLocaleString("id-ID"); }
+
+async function grind(){
+  if(!window.__katOk){ showErr("❌ Self-test keccak GAGAL di browser ini — halaman tidak dijalankan. Kabari Muse."); return; }
+  if(!navigator.gpu){ showErr("❌ Browser ini tidak mendukung WebGPU.<br><br>Yang bisa: <b>Chrome/Edge di laptop/PC</b> (terbaru), <b>Chrome Android</b> versi 113+ di HP dengan GPU Vulkan, atau <b>Safari iOS 26+</b>. Coba buka link ini di Chrome."); return; }
+  const adapter = await navigator.gpu.requestAdapter();
+  if(!adapter){ showErr("❌ WebGPU ada tapi GPU tidak tersedia di device ini."); return; }
+  device = await adapter.requestDevice();
+  const module = device.createShaderModule({ code: WGSL });
+  const info = await module.getCompilationInfo();
+  const errs = info.messages.filter(m=>m.type==="error");
+  if(errs.length){ showErr("❌ Shader error: "+errs[0].message+" — kabari Muse."); return; }
+  const pipeline = device.createComputePipeline({ layout:"auto", compute:{ module, entryPoint:"main" } });
+  const uniBuf = device.createBuffer({ size:16, usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST });
+  const outBuf = device.createBuffer({ size:32, usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST });
+  const stageBuf = device.createBuffer({ size:32, usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(outBuf, 0, new Uint32Array(8));
+  const bind = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries:[ {binding:0, resource:{buffer:uniBuf}}, {binding:1, resource:{buffer:outBuf}} ] });
+  const target = parseInt($("target").value)||45;
+  let base = (BigInt(Date.now()) * 1000003n) ^ BigInt(Math.floor(Math.random()*4294967296));
+  running = true; totalHashes = 0n; sessionBest = 0;
+  $("btnStart").style.display="none"; $("btnStop").style.display="block"; $("status").textContent="⛏️ menggiling…";
+  try{ await navigator.wakeLock.request("screen"); }catch(e){}
+  while(running){
+    const lo = Number(base & 0xffffffffn), hi = Number((base>>32n) & 0xffffffffn);
+    device.queue.writeBuffer(uniBuf, 0, new Uint32Array([lo, hi, target, 0]));
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipeline); pass.setBindGroup(0, bind); pass.dispatchWorkgroups(BATCH_WG); pass.end();
+    enc.copyBufferToBuffer(outBuf, 0, stageBuf, 0, 32);
+    const t0 = performance.now();
+    device.queue.submit([enc.finish()]);
+    await stageBuf.mapAsync(GPUMapMode.READ);
+    const dt = (performance.now()-t0)/1000;
+    const data = new Uint32Array(stageBuf.getMappedRange().slice(0));
+    stageBuf.unmap();
+    const batchHashes = BigInt(BATCH_WG*WG_SIZE);
+    totalHashes += batchHashes;
+    $("total").textContent = fmt(totalHashes);
+    $("rate").textContent = (Number(batchHashes)/dt/1e6).toFixed(1)+" MH/s";
+    if(data[4] > sessionBest){ sessionBest = data[4]; }
+    $("best").textContent = sessionBest+" bits";
+    if(data[0] === 1){
+      const nonce = (BigInt(data[2])<<32n) | BigInt(data[1]);
+      const vb = leadBits(chipHash(nonce));
+      if(vb >= target){
+        running = false;
+        $("status").textContent = "🎉 KENA — terverifikasi!";
+        $("found").style.display="block";
+        $("foundNonce").textContent = nonce.toString();
+        $("foundBits").textContent = vb+" bits (target "+target+") — nonce: "+nonce.toString();
+        window.__foundNonce = nonce.toString();
+        $("btnStart").style.display="block"; $("btnStop").style.display="none";
+        return;
+      } else {
+        showErr("⚠️ GPU lapor kena tapi verifikasi JS tidak cocok ("+vb+" bits) — lanjut giling, kabari Muse soal ini.");
+        device.queue.writeBuffer(outBuf, 0, new Uint32Array(8));
+      }
+    }
+    base += batchHashes;
+  }
+  $("status").textContent = "berhenti";
+  $("btnStart").style.display="block"; $("btnStop").style.display="none";
+}
+$("btnStart").addEventListener("click", ()=>{ grind().catch(e=>{ showErr("❌ Error: "+e.message); running=false; }); });
+$("btnStop").addEventListener("click", ()=>{ running=false; });
+$("btnCopy").addEventListener("click", async ()=>{
+  const t = window.__foundNonce || $("foundNonce").textContent;
+  try{ await navigator.clipboard.writeText(t); $("btnCopy").textContent="✅ KE-COPY: "+t; }
+  catch(e){ prompt("Copy manual nonce ini:", t); }
+});
+</script>
+</body>
+</html>
