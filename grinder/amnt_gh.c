@@ -162,5 +162,6 @@ int main(int argc, char** argv){
   for(long i=0;i<nthreads;i++) pthread_create(&th[i],NULL,worker,(void*)i);
   for(int i=0;i<nthreads;i++) pthread_join(th[i],NULL);
   printf("{\"hashes\":%llu,\"elapsed\":%ld}\n",(unsigned long long)atomic_load(&total_hashes),(long)(time(NULL)-T0));
+  fflush(stdout);
   return 0;
 }
