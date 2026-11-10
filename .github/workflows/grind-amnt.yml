@@ -71,7 +71,7 @@ jobs:
           START=$(( SHARD * 4 ))
           STEP=$(( JOBS * 4 ))
           echo "shard $SHARD/$JOBS start=$START step=$STEP cap=${SECONDS}s day=$DAY lane=$LANE"
-          timeout "${SECONDS}s" ./amnt "$SEED" grind "$DAY" "$LANE" "$TARGET" 4 $START $STEP $SECONDS > found.txt || true
+          timeout "$((SECONDS + 30))s" ./amnt "$SEED" grind "$DAY" "$LANE" "$TARGET" 4 $START $STEP $SECONDS > found.txt || true
           cat found.txt || true
       - name: Upload result
         if: always()
