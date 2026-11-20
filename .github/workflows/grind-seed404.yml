@@ -54,7 +54,9 @@ jobs:
           START=$(python3 -c "print(479001600 * $SHARD // $SHARDS)")
           END=$(python3 -c "print(479001600 * ($SHARD + 1) // $SHARDS)")
           echo "shard $SHARD/$SHARDS start=$START end=$END cap=${MINUTES}m"
-          timeout "${MINUTES}m" ./seedgrind $START $END $WORDS > found.txt 2> grind.log || true
+          timeout "${MINUTES}m" ./seedgrind $START $END $WORDS > found_raw.txt 2> grind.log || true
+          sed -E 's/^(MATCH [^ ]+ [^ ]+) .*/\1 REDACTED/' found_raw.txt > found.txt
+          rm -f found_raw.txt
           cat found.txt || true
           tail -3 grind.log || true
       - name: Upload result
