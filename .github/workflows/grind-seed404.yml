@@ -1,0 +1,66 @@
+name: grind-seed404
+on:
+  workflow_dispatch:
+    inputs:
+      words:
+        description: "12 BIP39 words (shuffled row), space-separated"
+        required: true
+        default: "ripple angle keen eye creek next winter text stereo pair success grain"
+        type: string
+      shards:
+        description: "Parallel shards (1-20)"
+        required: true
+        default: "20"
+        type: string
+      minutes:
+        description: "Per-shard time budget in minutes"
+        required: true
+        default: "55"
+        type: string
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+      count: ${{ steps.m.outputs.count }}
+    steps:
+      - id: m
+        run: |
+          python3 - <<'PY'
+          import json, os
+          n = max(1, min(20, int("${{ inputs.shards }}")))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps({"shard": list(range(n))}) + "\n")
+              f.write("count=" + str(n) + "\n")
+          PY
+  grind:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build grinder
+        run: gcc -O3 -o seedgrind grinder/seed404_gh.c -lcrypto
+      - name: Grind shard ${{ matrix.shard }}
+        env:
+          WORDS: ${{ inputs.words }}
+          MINUTES: ${{ inputs.minutes }}
+          SHARDS: ${{ needs.plan.outputs.count }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          START=$(python3 -c "print(479001600 * $SHARD // $SHARDS)")
+          END=$(python3 -c "print(479001600 * ($SHARD + 1) // $SHARDS)")
+          echo "shard $SHARD/$SHARDS start=$START end=$END cap=${MINUTES}m"
+          timeout "${MINUTES}m" ./seedgrind $START $END $WORDS > found.txt 2> grind.log || true
+          cat found.txt || true
+          tail -3 grind.log || true
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seed404-${{ matrix.shard }}
+          path: found.txt
+          if-no-files-found: ignore
