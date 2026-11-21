@@ -343,16 +343,26 @@ contract BandMathVerifyTest is Test {
         if (bBid == 0) return; // band itself halts; nothing to clamp against
 
         // Customizable variant, marginStep = 0 deployment (index 2), same minMargin.
+        // By design the shaped path fails closed when spreadBps*confidence >=
+        // CONFIDENCE_BASE (the shaped bid is zeroed) — a halt there is correct,
+        // not an availability bug. Outside that region it must not halt, and
+        // whenever it quotes, the clamp must keep it no tighter than the band.
         APPHarness cust = shapedApps[2];
         vm.warp(block.timestamp + 61);
         cust.setConfidenceParam(conf);
         (uint128 cBid, uint128 cAsk, uint128 cRef) = cust.computeBidAsk(mid, DEC8, s, bh, 0, false);
-        assertGt(cBid, 0, "customizable halted on valid band");
-        assertLe(cBid, bBid, "shaped bid tighter than band");
-        assertGe(cAsk, bAsk, "shaped ask tighter than band");
-        assertEq(cRef, bRef, "reference moved by shaping");
-        assertLe(cBid, cRef);
-        assertLe(cRef, cAsk);
+        bool shapedMustHalt = s * conf >= 1e10; // CONFIDENCE_BASE
+        if (shapedMustHalt) {
+            assertEq(cBid, 0, "shaped path quoted in the fail-closed region");
+            assertEq(cAsk, type(uint128).max, "shaped path quoted in the fail-closed region");
+        } else {
+            assertGt(cBid, 0, "customizable halted on valid band");
+            assertLe(cBid, bBid, "shaped bid tighter than band");
+            assertGe(cAsk, bAsk, "shaped ask tighter than band");
+            assertEq(cRef, bRef, "reference moved by shaping");
+            assertLe(cBid, cRef);
+            assertLe(cRef, cAsk);
+        }
 
         // Source mode: arbitrary source quote must be clamped to the band or halt.
         uint256 sb = bound(srcSeed, 0, uint256(bAsk) * 2 + 10);
