@@ -1,0 +1,70 @@
+name: sokoban-sweep
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "Solver variant (astar | astar_manh | bfs | greedy)"
+        required: true
+        default: "astar"
+        type: string
+      budget:
+        description: "Max states per room search"
+        required: true
+        default: "300000"
+        type: string
+      shards:
+        description: "Parallel jobs (1-10)"
+        required: true
+        default: "8"
+        type: string
+      sets:
+        description: "Total synthetic sets to cover (max 120)"
+        required: true
+        default: "120"
+        type: string
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+      count: ${{ steps.m.outputs.count }}
+    steps:
+      - id: m
+        run: |
+          python3 - <<'PY'
+          import json, math, os
+          n = max(1, min(10, int("${{ inputs.shards }}")))
+          total = max(1, min(120, int("${{ inputs.sets }}")))
+          per = math.ceil(total / n)
+          matrix = {"shard": [{"i": i, "start": i * per, "count": min(per, total - i * per)} for i in range(n) if i * per < total]}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps(matrix) + "\n")
+              f.write("count=" + str(len(matrix["shard"])) + "\n")
+          PY
+  sweep:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Unpack test sets
+        run: tar xzf makefun-sokoban/sets.tar.gz -C makefun-sokoban
+      - name: Sweep shard ${{ matrix.shard.i }}
+        run: |
+          node --version
+          node makefun-sokoban/sweep.mjs makefun-sokoban/sets "${{ inputs.variant }}" "${{ inputs.budget }}" "" "${{ matrix.shard.count }}" "shard-${{ matrix.shard.i }}.json" "${{ matrix.shard.start }}" | tee "shard-${{ matrix.shard.i }}.log"
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sokoban-${{ inputs.variant }}-shard-${{ matrix.shard.i }}
+          path: |
+            shard-${{ matrix.shard.i }}.json
+            shard-${{ matrix.shard.i }}.log
+          if-no-files-found: ignore
