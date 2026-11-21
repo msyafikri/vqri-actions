@@ -18,9 +18,9 @@ on:
         default: "8"
         type: string
       sets:
-        description: "Total synthetic sets to cover (max 120)"
+        description: "Total synthetic sets to cover (max 240)"
         required: true
-        default: "120"
+        default: "240"
         type: string
 jobs:
   plan:
@@ -34,7 +34,7 @@ jobs:
           python3 - <<'PY'
           import json, math, os
           n = max(1, min(10, int("${{ inputs.shards }}")))
-          total = max(1, min(120, int("${{ inputs.sets }}")))
+          total = max(1, min(240, int("${{ inputs.sets }}")))
           per = math.ceil(total / n)
           matrix = {"shard": [{"i": i, "start": i * per, "count": min(per, total - i * per)} for i in range(n) if i * per < total]}
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
