@@ -1,0 +1,61 @@
+name: metric-verify
+on:
+  workflow_dispatch:
+    inputs:
+      campaign:
+        description: "band | codebook | liquidity"
+        required: true
+        default: "band"
+      shards:
+        description: "number of active shards (0-7 used)"
+        required: true
+        default: "4"
+      fuzz_runs:
+        description: "forge fuzz runs per fuzz test"
+        required: true
+        default: "2000"
+      seed_base:
+        description: "base seed; shard seed = base + shard"
+        required: true
+        default: "1000"
+      band_cases:
+        description: "generated band cases per shard (band campaign)"
+        required: true
+        default: "3000"
+      shaped_cases:
+        description: "generated shaped cases per shard (band campaign)"
+        required: true
+        default: "1200"
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+      - name: Run shard
+        shell: bash
+        run: |
+          if [ "${{ matrix.shard }}" -ge "${{ inputs.shards }}" ]; then
+            echo '{"status":"skipped","note":"shard beyond requested count"}' > result.json
+            echo "skipped" > forge-tail.log
+            exit 0
+          fi
+          chmod +x metric-verify/run.sh
+          bash metric-verify/run.sh "${{ inputs.campaign }}" "${{ matrix.shard }}" "$(( ${{ inputs.seed_base }} + ${{ matrix.shard }} ))" "${{ inputs.fuzz_runs }}" "${{ inputs.band_cases }}" "${{ inputs.shaped_cases }}"
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ inputs.campaign }}-${{ matrix.shard }}
+          path: |
+            result.json
+            forge-tail.log
+          if-no-files-found: warn
