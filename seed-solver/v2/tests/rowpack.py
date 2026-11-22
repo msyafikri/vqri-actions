@@ -26,3 +26,15 @@ def select_row(words_s, targets_s, row):
     if row < 1 or row > len(words):
         raise ValueError("row out of range")
     return words[row - 1], targets[row - 1]
+
+
+def select_row_words(words_s, row):
+    """Words-only variant for balance-hunt events, which publish word
+    sets with NO target addresses (SEED_TARGET is absent/empty there).
+    Same ';' packing and 1-based row indexing as select_row()."""
+    words = split_packed(words_s)
+    if not words:
+        raise ValueError("no packed rows")
+    if row < 1 or row > len(words):
+        raise ValueError("row out of range")
+    return words[row - 1]
