@@ -17,6 +17,11 @@ on:
         required: true
         default: "0"
         type: string
+      path:
+        description: "Derivation path, e.g. 44'/501'/0'/0' — or 'raw' for seed[:32] keypair"
+        required: true
+        default: "44'/501'/0'/0'"
+        type: string
 jobs:
   plan:
     runs-on: ubuntu-latest
@@ -55,6 +60,7 @@ jobs:
           JOBS: ${{ needs.plan.outputs.count }}
           PROCS: ${{ inputs.procs }}
           LIMIT: ${{ inputs.limit_perms }}
+          DERIV_PATH: ${{ inputs.path }}
         run: |
           if [ -z "$SEED_WORDS" ] || [ -z "$SEED_TARGET" ]; then
             echo "secrets missing"
@@ -82,6 +88,7 @@ jobs:
           i=0
           while read -r S E; do
             ./seed-solver/seed_solver --words "$SEED_WORDS" --targets "$SEED_TARGET" \
+              --paths "$DERIV_PATH" \
               --start "$S" --end "$E" > "out_$i.txt" 2> "err_$i.txt" &
             i=$((i+1))
           done < ranges.txt
