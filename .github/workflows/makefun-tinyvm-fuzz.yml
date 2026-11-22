@@ -1,0 +1,67 @@
+name: makefun-tinyvm-fuzz
+on:
+  workflow_dispatch:
+    inputs:
+      shards:
+        description: "Parallel jobs (1-10)"
+        required: true
+        default: "6"
+        type: string
+      sets:
+        description: "Generated sets per shard (40 instances each)"
+        required: true
+        default: "30"
+        type: string
+      mutations:
+        description: "Mutated programs per shard"
+        required: true
+        default: "15000"
+        type: string
+      random:
+        description: "Random-byte programs per shard"
+        required: true
+        default: "15000"
+        type: string
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: |
+          python3 - <<'PY'
+          import json, os
+          n = max(1, min(10, int("${{ inputs.shards }}")))
+          matrix = {"shard": [{"i": i} for i in range(n)]}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps(matrix) + "\n")
+          PY
+  fuzz:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Unpack kit subject mirror
+        run: tar xzf makefun-tinyvm/kit-subject.tar.gz -C makefun-tinyvm
+      - name: Practice score
+        run: |
+          node --version
+          node makefun-tinyvm/score-practice.mjs | python3 -c "import json,sys; d=json.load(sys.stdin); print('PRACTICE SCORE:', d['score'], 'answered:', d['answered'], '/', d['instances'])"
+      - name: Fuzz shard ${{ matrix.shard.i }}
+        run: |
+          node makefun-tinyvm/fuzz.mjs --kit makefun-tinyvm/kit-subject --seed ${{ matrix.shard.i }} --sets "${{ inputs.sets }}" --mutations "${{ inputs.mutations }}" --random "${{ inputs.random }}" | tee "fuzz-shard-${{ matrix.shard.i }}.log"
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tinyvm-fuzz-shard-${{ matrix.shard.i }}
+          path: fuzz-shard-${{ matrix.shard.i }}.log
+          if-no-files-found: ignore
