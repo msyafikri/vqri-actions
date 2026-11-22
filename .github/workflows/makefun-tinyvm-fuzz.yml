@@ -54,7 +54,7 @@ jobs:
       - name: Practice score
         run: |
           node --version
-          node makefun-tinyvm/score-practice.mjs | python3 -c "import json,sys; d=json.load(sys.stdin); print('PRACTICE SCORE:', d['score'], 'answered:', d['answered'], '/', d['instances'])"
+          node makefun-tinyvm/score-practice.mjs --kit makefun-tinyvm/kit-subject | python3 -c "import json,sys; d=json.load(sys.stdin); print('PRACTICE SCORE:', d['score'], 'answered:', d['answered'], '/', d['instances'])"
       - name: Fuzz shard ${{ matrix.shard.i }}
         run: |
           node makefun-tinyvm/fuzz.mjs --kit makefun-tinyvm/kit-subject --seed ${{ matrix.shard.i }} --sets "${{ inputs.sets }}" --mutations "${{ inputs.mutations }}" --random "${{ inputs.random }}" | tee "fuzz-shard-${{ matrix.shard.i }}.log"
