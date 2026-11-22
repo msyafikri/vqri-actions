@@ -131,7 +131,7 @@ jobs:
             cat "$f"
             if grep -q '^HIT ' "$f"; then
               grep '^HIT ' "$f" | sed -E 's/^HIT (.*)$/\1/' | \
-                sed "s/$/ job=$JOB row=$ROW path=$DERIV_PATH/" >> hit.txt
+                sed "s|$| job=$JOB row=$ROW path=$DERIV_PATH|" >> hit.txt
               HIT=1
             fi
             if ! grep -q '^COVERAGE .* status=OK$' "$f"; then
