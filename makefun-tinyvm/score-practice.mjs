@@ -5,16 +5,19 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const KIT = process.argv.includes('--kit')
+const HERE = dirname(fileURLToPath(import.meta.url));
+
+const KIT = resolve(process.argv.includes('--kit')
   ? process.argv[process.argv.indexOf('--kit') + 1]
-  : '/home/hatch/workspace/makefun/tinyvm-01/tinyvm-kit-fresh/tiny-stack-vm-01-run-20261122-kit';
+  : '/home/hatch/workspace/makefun/tinyvm-01/tinyvm-kit-fresh/tiny-stack-vm-01-run-20261122-kit');
 
 const { points } = await import(join(KIT, 'program/scorer/checker/check.mjs'));
 const manifest = JSON.parse(readFileSync(join(KIT, 'practice/reference/manifest.json'), 'utf8'));
 const outDir = mkdtempSync(join(tmpdir(), 'tinyvm-out-'));
-execFileSync(process.execPath, ['entry.js', join(KIT, 'practice/input'), outDir], { stdio: 'inherit' });
+execFileSync(process.execPath, [join(HERE, 'entry.js'), join(KIT, 'practice/input'), outDir], { stdio: 'inherit' });
 
 let total = 0;
 const rows = [];
