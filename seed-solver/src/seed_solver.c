@@ -405,6 +405,8 @@ static void ed25519_pubkey(const uint8_t kseed[32], uint8_t out[32])
 typedef struct {
     uint32_t comp[MAXPATHLEN];
     int len;
+    int raw; /* 1 = no derivation: ed25519 keypair from seed[0..32) directly
+              * (solders / web3.js Keypair.fromSeed(seed[:32])) */
     char label[64];
 } Path;
 
@@ -413,6 +415,14 @@ static int g_npaths = 0;
 
 static int parse_one_path(const char *s, Path *p)
 {
+    /* special token: "raw" = no derivation path at all */
+    if (strcmp(s, "raw") == 0) {
+        p->len = 0;
+        p->raw = 1;
+        snprintf(p->label, sizeof(p->label), "%s", s);
+        return 0;
+    }
+    p->raw = 0;
     /* s like 44'/501'/0'/0' — every component must be hardened (') */
     char buf[64];
     size_t sl = strlen(s);
@@ -459,6 +469,15 @@ static void derive_path_pubkey(const uint8_t seed[64], const Path *p,
                                uint8_t pub[32], uint8_t *kout, uint8_t *cout)
 {
     uint8_t k[32], c[32];
+    if (p->raw) {
+        /* no SLIP-0010 at all: private key = first 32 bytes of the seed */
+        memcpy(k, seed, 32);
+        memset(c, 0, 32);
+        ed25519_pubkey(k, pub);
+        if (kout) memcpy(kout, k, 32);
+        if (cout) memcpy(cout, c, 32);
+        return;
+    }
     slip10_master(seed, 64, k, c);
     for (int i = 0; i < p->len; i++)
         slip10_child(k, c, p->comp[i], k, c);
