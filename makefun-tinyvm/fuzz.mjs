@@ -6,11 +6,11 @@
 //   node fuzz.mjs --seed 1 --sets 20 --mutations 3000 --random 3000
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
-const KIT = process.argv.includes('--kit')
+const KIT = resolve(process.argv.includes('--kit')
   ? process.argv[process.argv.indexOf('--kit') + 1]
-  : '/home/hatch/workspace/makefun/tinyvm-01/tinyvm-kit-fresh/tiny-stack-vm-01-run-20261122-kit';
+  : '/home/hatch/workspace/makefun/tinyvm-01/tinyvm-kit-fresh/tiny-stack-vm-01-run-20261122-kit');
 const SUBJECT = join(KIT, 'program/generator/subject');
 
 const { run: oracle } = await import(join(SUBJECT, 'vm.mjs'));
