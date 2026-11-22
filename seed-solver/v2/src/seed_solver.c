@@ -19,6 +19,9 @@
  *
  * Modes:
  *   solve (default)   search a rank range / shard for a target match
+ *   --hunt            balance hunt: print "<rank> <address>" for EVERY
+ *                     checksum survivor in range (no target; an external
+ *                     checker filters by on-chain balance)
  *   --derive          print seed + address(es) for one exact word ordering
  *   --check           print VALID / INVALID for one exact word ordering
  *   --derive-seed     SLIP-0010 derive from a raw hex seed (test vectors)
@@ -493,6 +496,7 @@ static void usage(const char *prog)
     fprintf(stderr,
         "usage:\n"
         "  %s --words \"w1 ... wN\" --targets addr[,addr...] [options]\n"
+        "  %s --hunt --words \"w1 ... wN\" [--paths \"44'/501'/0'/0'\"] [range options]\n"
         "  %s --derive --words \"w1 ... wN\" [--paths \"44'/501'/0'/0'\"] [--passphrase X] [--print-seed]\n"
         "  %s --check --words \"w1 ... wN\"\n"
         "  %s --derive-seed HEX --path \"0'/1'\"   (empty --path = master)\n"
@@ -502,7 +506,7 @@ static void usage(const char *prog)
         "  %s --bench-full SECS --words \"w1 ... wN\" [--paths ...]\n"
         "options: --words-file F --targets-file F --shard-index i --shard-count n\n"
         "         --start R --end R --max-seconds S --continue --pubimpl evp|sodium\n",
-        prog, prog, prog, prog, prog, prog, prog, prog);
+        prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
 /* split a string of space-separated words into indices; returns count */
@@ -671,6 +675,7 @@ static int mode_dump(const uint16_t *idx, int n,
 
 typedef struct {
     char phrases[LANES][PHRASE_BUF];
+    u128 ranks[LANES]; /* per-survivor rank (hunt mode prints it) */
     int count;
     const uint8_t *salt;
     int saltlen;
@@ -849,6 +854,125 @@ static int mode_solve(const uint16_t *idx, int n,
     return matches > 0 ? 0 : 1;
 }
 
+/* ------------------------------------------------------------------ */
+/* hunt mode: no target address. Every checksum survivor in range is   */
+/* derived and printed as "<rank> <base58 address>" (one line per      */
+/* survivor per path). An external checker (tools/balance_check.py)    */
+/* filters the stream by on-chain balance. Same factorial-rank         */
+/* sharding and survivor batching as solve, so slices are disjoint     */
+/* and their union is the full space; multiset permutations mean       */
+/* duplicate words never produce duplicate orderings. Exit 0 when the  */
+/* range is exhausted.                                                 */
+/* ------------------------------------------------------------------ */
+static void hunt_flush(BatchCtx *b, uint8_t seeds[LANES][64])
+{
+    int nb = b->count;
+    batch_seeds(b, seeds);
+    char rs[48], addr[64];
+    for (int li = 0; li < nb; li++) {
+        u128_to_str(b->ranks[li], rs);
+        for (int p = 0; p < g_npaths; p++) {
+            uint8_t pub[32];
+            derive_path_pubkey(seeds[li], &g_paths[p], pub, NULL, NULL);
+            base58_encode(pub, 32, addr);
+            printf("%s %s\n", rs, addr);
+        }
+    }
+}
+
+static int mode_hunt(const uint16_t *idx, int n, const char *passphrase,
+                     long shard_index, long shard_count,
+                     const char *start_s, const char *end_s,
+                     double max_seconds)
+{
+    uint16_t sorted[MAXN];
+    memcpy(sorted, idx, (size_t)n * sizeof(uint16_t));
+    qsort(sorted, (size_t)n, sizeof(uint16_t), cmp_u16);
+    u128 start, end;
+    if (resolve_range(sorted, n, shard_index, shard_count,
+                      start_s, end_s, &start, &end) != 0) {
+        fprintf(stderr, "bad range / shard args\n");
+        return 2;
+    }
+    char sbuf[48], ebuf[48], tbuf[48];
+    u128_to_str(start, sbuf);
+    u128_to_str(end, ebuf);
+    u128_to_str(total_perms(sorted, n), tbuf);
+    fprintf(stderr,
+            "[hunt] v2 (lanes=%d) shard %ld/%ld ranks [%s, %s) of %s total perms, %d path(s)\n",
+            LANES, shard_index, shard_count, sbuf, ebuf, tbuf, g_npaths);
+
+    char salt[1024];
+    snprintf(salt, sizeof(salt), "mnemonic%s", passphrase);
+    int saltlen = (int)strlen(salt);
+
+    setvbuf(stdout, NULL, _IOFBF, 1 << 20);
+
+    uint16_t perm[MAXN];
+    unrank(start, sorted, n, perm);
+
+    uint64_t done = 0, valid = 0;
+    double t_begin = now_sec(), t_last = t_begin;
+    double acc_check = 0.0, acc_derive = 0.0;
+    u128 span = end - start;
+
+    BatchCtx batch;
+    batch_init(&batch, salt, saltlen);
+    uint8_t seeds[LANES][64];
+
+    for (u128 rank = start; rank < end; rank++) {
+        double t0 = now_sec();
+        int ok = bip39_checksum_valid_n(perm, n);
+        double t1 = now_sec();
+        acc_check += t1 - t0;
+        if (ok) {
+            valid++;
+            batch.ranks[batch.count] = rank;
+            phrase_from_indices(perm, n, batch.phrases[batch.count]);
+            batch.count++;
+            if (batch.count == LANES) {
+                double d0 = now_sec();
+                hunt_flush(&batch, seeds);
+                acc_derive += now_sec() - d0;
+            }
+        }
+        done++;
+        if (rank + 1 < end && !next_perm(perm, n)) break;
+        double tnow = now_sec();
+        if (tnow - t_last >= 10.0) {
+            double el = tnow - t_begin;
+            double pct = span > 0 ? 100.0 * (double)done / (double)span : 100.0;
+            double rate = el > 0 ? done / el : 0;
+            double eta = rate > 0 ? (double)(span - done) / rate : 0;
+            fprintf(stderr,
+                    "[hunt] %.1f%% done=%llu valid=%llu rate=%.0f/s eta=%.0fs\n",
+                    pct, (unsigned long long)done,
+                    (unsigned long long)valid, rate, eta);
+            t_last = tnow;
+        }
+        if (max_seconds > 0 && tnow - t_begin >= max_seconds) {
+            fprintf(stderr, "[hunt] max-seconds reached, stopping\n");
+            break;
+        }
+    }
+    if (batch.count > 0) {
+        double d0 = now_sec();
+        hunt_flush(&batch, seeds);
+        acc_derive += now_sec() - d0;
+    }
+    fflush(stdout);
+
+    double wall = now_sec() - t_begin;
+    fprintf(stderr,
+            "[done] perms=%llu valid=%llu wall=%.2fs "
+            "checksum_rate=%.0f/s end_to_end_rate=%.0f/s "
+            "(checksum_time=%.2fs derive_time=%.2fs)\n",
+            (unsigned long long)done, (unsigned long long)valid, wall,
+            acc_check > 0 ? done / acc_check : 0.0,
+            wall > 0 ? done / wall : 0.0, acc_check, acc_derive);
+    return 0;
+}
+
 static int mode_bench(const uint16_t *idx, int n, double seconds, int full,
                       const char *passphrase)
 {
@@ -962,6 +1086,7 @@ int main(int argc, char **argv)
             else if (strcmp(v, "evp") == 0) g_pubimpl = 0;
             else { usage(argv[0]); return 2; }
         }
+        else if (strcmp(argv[i], "--hunt") == 0) mode = "hunt";
         else if (strcmp(argv[i], "--derive") == 0) mode = "derive";
         else if (strcmp(argv[i], "--check") == 0) mode = "check";
         else if (strcmp(argv[i], "--rank") == 0) mode = "rank";
@@ -1031,6 +1156,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(mode, "dump") == 0)
         return mode_dump(idx, n, shard_index, shard_count, start_s, end_s);
+    if (strcmp(mode, "hunt") == 0)
+        return mode_hunt(idx, n, passphrase, shard_index, shard_count,
+                         start_s, end_s, max_seconds);
     if (strcmp(mode, "bench-checksum") == 0)
         return mode_bench(idx, n, bench_secs, 0, passphrase);
     if (strcmp(mode, "bench-full") == 0)
