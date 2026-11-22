@@ -47,6 +47,7 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev libsodium-dev > /dev/null 2>&1 || true
           make -C seed-solver
       - name: Solve slice ${{ matrix.job }}
+        id: solve
         env:
           SEED_WORDS: ${{ secrets.SEED_WORDS }}
           SEED_TARGET: ${{ secrets.SEED_TARGET }}
@@ -92,8 +93,17 @@ jobs:
               PHRASE=$(grep '^MATCH ' "$f" | head -1 | cut -d' ' -f4-)
               RANK=$(./seed-solver/seed_solver --rank --words "$PHRASE" | awk '{print $2}')
               echo "HIT job=$JOB rank=$RANK"
+              echo "rank=$RANK job=$JOB" > hit.txt
+              echo "hit=true" >> "$GITHUB_OUTPUT"
               HIT=1
             fi
           done
           rm -f out_*.txt ranges.txt
           echo "job $JOB finished hit=$HIT"
+      - name: Upload hit rank
+        if: steps.solve.outputs.hit == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hit-${{ matrix.job }}
+          path: hit.txt
+          if-no-files-found: error
