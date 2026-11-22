@@ -1,0 +1,152 @@
+name: seed-hunt-bal
+on:
+  workflow_dispatch:
+    inputs:
+      row:
+        description: "Row index (1-based) into the ';'-packed SEED_WORDS secret"
+        required: true
+        default: "1"
+        type: string
+      path:
+        description: "Derivation path, e.g. 44'/501'/0'/0' — or 'raw' for seed[:32] keypair"
+        required: true
+        default: "44'/501'/0'/0'"
+        type: string
+      jobs:
+        description: "Matrix jobs (1-32)"
+        required: true
+        default: "32"
+        type: string
+      procs:
+        description: "Parallel solver processes per job"
+        required: true
+        default: "4"
+        type: string
+      limit_perms:
+        description: "Probe cap: perms per proc starting at rank 0 (0 = full sweep)"
+        required: true
+        default: "0"
+        type: string
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+      count: ${{ steps.m.outputs.count }}
+    steps:
+      - id: m
+        run: |
+          python3 - <<'PY'
+          import json, os
+          n = max(1, min(32, int("${{ inputs.jobs }}")))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps({"job": list(range(n))}) + "\n")
+              f.write("count=" + str(n) + "\n")
+          PY
+  hunt:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build solver v2
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev libsodium-dev > /dev/null 2>&1 || true
+          make -C seed-solver/v2
+      - name: Hunt slice ${{ matrix.job }}
+        id: hunt
+        env:
+          SEED_WORDS: ${{ secrets.SEED_WORDS }}
+          JOB: ${{ matrix.job }}
+          JOBS: ${{ needs.plan.outputs.count }}
+          PROCS: ${{ inputs.procs }}
+          LIMIT: ${{ inputs.limit_perms }}
+          DERIV_PATH: ${{ inputs.path }}
+          ROW: ${{ inputs.row }}
+        run: |
+          if [ -z "$SEED_WORDS" ]; then
+            echo "SEED_WORDS secret missing"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import os, subprocess, sys
+          sys.path.insert(0, "seed-solver/v2/tests")
+          from rowpack import select_row_words
+          words = select_row_words(os.environ["SEED_WORDS"],
+                                   int(os.environ["ROW"]))
+          open("row_words.txt", "w").write(words + "\n")
+          out = subprocess.run(["./seed-solver/v2/seed_solver", "--rank",
+                                "--words", words],
+                               capture_output=True, text=True)
+          if out.returncode != 0:
+              print("row selection invalid")
+              sys.exit(1)
+          total = int(out.stdout.split()[3])
+          jobs = int(os.environ["JOBS"]); procs = int(os.environ["PROCS"])
+          job = int(os.environ["JOB"]); limit = int(os.environ["LIMIT"])
+          slices = jobs * procs
+          lines = []
+          for p in range(procs):
+              if limit > 0:
+                  s = (job * procs + p) * limit
+                  e = s + limit
+              else:
+                  s = total * (job * procs + p) // slices
+                  e = total * (job * procs + p + 1) // slices
+              lines.append(f"{s} {e}")
+          open("ranges.txt", "w").write("\n".join(lines) + "\n")
+          print(f"row total perms: {total}")
+          PY
+          echo "job $JOB of $JOBS ranges:"
+          cat ranges.txt
+          i=0
+          while read -r S E; do
+            ./seed-solver/v2/seed_solver --hunt --words-file row_words.txt \
+              --paths "$DERIV_PATH" \
+              --start "$S" --end "$E" 2> "err_$i.txt" \
+              | python3 seed-solver/v2/tools/balance_check.py \
+                  > "check_$i.txt" 2> "checkerr_$i.txt" &
+            i=$((i+1))
+          done < ranges.txt
+          wait
+          for f in err_*.txt; do echo "--- solver $f"; tail -1 "$f"; done
+          DONE_N=$(grep -l '^\[done\]' err_*.txt | wc -l)
+          if [ "$DONE_N" -ne "$PROCS" ]; then
+            echo "SOLVER-WARNING job=$JOB only $DONE_N/$PROCS solver slices reported [done]"
+          fi
+          HIT=0
+          : > hit.txt
+          for f in check_*.txt; do
+            echo "--- checker $f"
+            cat "$f"
+            if grep -q '^HIT ' "$f"; then
+              grep '^HIT ' "$f" | sed -E 's/^HIT (.*)$/\1/' | \
+                sed "s/$/ job=$JOB row=$ROW path=$DERIV_PATH/" >> hit.txt
+              HIT=1
+            fi
+            if ! grep -q '^COVERAGE .* status=OK$' "$f"; then
+              echo "COVERAGE-WARNING job=$JOB $f: $(grep '^COVERAGE ' "$f" || echo 'no coverage line')"
+            fi
+          done
+          for f in checkerr_*.txt; do
+            if [ -s "$f" ]; then echo "--- checker stderr $f (tail)"; tail -3 "$f"; fi
+          done
+          if [ "$HIT" -eq 1 ]; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+            echo "HIT(S) in job $JOB:"
+            cat hit.txt
+          else
+            rm -f hit.txt
+          fi
+          rm -f ranges.txt row_words.txt
+          echo "job $JOB finished hit=$HIT"
+      - name: Upload hit
+        if: steps.hunt.outputs.hit == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hit-bal-${{ matrix.job }}
+          path: hit.txt
+          if-no-files-found: error
