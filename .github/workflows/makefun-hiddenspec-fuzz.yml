@@ -1,0 +1,58 @@
+name: makefun-hiddenspec-fuzz
+on:
+  workflow_dispatch:
+    inputs:
+      shards:
+        description: "Parallel jobs (1-10)"
+        required: true
+        default: "6"
+        type: string
+      cases:
+        description: "Differential fuzz cases per shard"
+        required: true
+        default: "1000"
+        type: string
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: |
+          python3 - <<'PY'
+          import json, os
+          n = max(1, min(10, int("${{ inputs.shards }}")))
+          matrix = {"shard": [{"i": i} for i in range(n)]}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps(matrix) + "\n")
+          PY
+  fuzz:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Python reference practice score
+        run: |
+          python3 --version
+          node --version
+          python3 makefun-hiddenspec/check_practice.py --ref makefun-hiddenspec/mend_ref.py --practice makefun-hiddenspec/practice.json
+      - name: Fuzz shard ${{ matrix.shard.i }}
+        run: |
+          python3 makefun-hiddenspec/differ.py --ref makefun-hiddenspec/mend_ref.py --engine makefun-hiddenspec/engine-main.ts --seed ${{ matrix.shard.i }} --cases "${{ inputs.cases }}" --out "divergences-shard-${{ matrix.shard.i }}" | tee "fuzz-shard-${{ matrix.shard.i }}.log"
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hiddenspec-fuzz-shard-${{ matrix.shard.i }}
+          path: |
+            fuzz-shard-${{ matrix.shard.i }}.log
+            divergences-shard-${{ matrix.shard.i }}
+          if-no-files-found: ignore
