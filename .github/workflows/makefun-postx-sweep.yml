@@ -1,0 +1,52 @@
+name: makefun-postx-sweep
+on:
+  workflow_dispatch:
+    inputs:
+      shards:
+        description: "Parallel jobs (1-10)"
+        required: true
+        default: "6"
+        type: string
+      games:
+        description: "Demo-autopilot games per shard"
+        required: true
+        default: "40"
+        type: string
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: |
+          python3 - <<'PY'
+          import json, os
+          n = max(1, min(10, int("${{ inputs.shards }}")))
+          matrix = {"shard": [{"i": i, "seed0": 10000 + i * 1000} for i in range(n)]}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps(matrix) + "\n")
+          PY
+  sweep:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Sweep shard ${{ matrix.shard.i }}
+        run: |
+          node --version
+          node makefun-postx/sweep.mjs --seed0 ${{ matrix.shard.seed0 }} --games "${{ inputs.games }}" --out sweep-shard-${{ matrix.shard.i }}.json
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postx-sweep-shard-${{ matrix.shard.i }}
+          path: sweep-shard-${{ matrix.shard.i }}.json
+          if-no-files-found: ignore
