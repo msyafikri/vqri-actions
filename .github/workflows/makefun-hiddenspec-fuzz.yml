@@ -46,6 +46,7 @@ jobs:
           python3 makefun-hiddenspec/check_practice.py --ref makefun-hiddenspec/mend_ref.py --practice makefun-hiddenspec/practice.json
       - name: Fuzz shard ${{ matrix.shard.i }}
         run: |
+          set -o pipefail
           python3 makefun-hiddenspec/differ.py --ref makefun-hiddenspec/mend_ref.py --engine makefun-hiddenspec/engine-main.ts --seed ${{ matrix.shard.i }} --cases "${{ inputs.cases }}" --out "divergences-shard-${{ matrix.shard.i }}" | tee "fuzz-shard-${{ matrix.shard.i }}.log"
       - name: Upload result
         if: always()
