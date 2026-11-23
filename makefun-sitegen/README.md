@@ -43,6 +43,15 @@ credentials anywhere in here — only generic parameters in workflow inputs/logs
 | v3 | ~166 ms | 3.56× |
 | v4 | ~166 ms | 3.67× |
 
-Differential: practice 3/3 + 663 mutation/fresh programs, 0 divergences (local).
-One bug found by fresh-set fuzzing and fixed in v4: front-matter close on line 1
-(`---\n---\n…`) was missed by the close search starting at index 4 instead of 3.
+## Fleet results (node 22, GitHub runners — run 45123280915, 2026-11-23, success)
+
+- Practice differential: 3/3 PASS (v4 vs vendor baseline).
+- Warm bench, median of 7 reps: **v4 123.1 ms vs baseline 490.7 ms = 3.98×**
+  (g-0001 34.0 ms / 3.26×, g-0002 53.9 ms / 3.98×, g-0003 71.2 ms / 2.77×).
+- All-variants side-by-side (`bench-one.mjs`, deep-copy overhead included):
+  v1 226.1 ms, v2 193.2 ms, v3 193.9 ms, v4 189.2 ms, baseline 615.8 ms.
+- Fuzz: 4 shards × 512 programs = **2,048 programs, 0 divergences, 0 crashes**
+  (3 base + 500 mutations + 9 fresh generated cases per shard).
+
+Differential: practice 3/3 + 663 mutation/fresh programs, 0 divergences (local),
+plus 2,048 programs on the fleet, 0 divergences.
