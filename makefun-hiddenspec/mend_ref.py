@@ -376,7 +376,10 @@ def parse_unified(lines):
                     j += 1
                 else:
                     break
-            while body and body[-1] == "":
+            while body and body[-1] in ("", " "):
+                # empty lines at the end of a body are not part of it:
+                # a zero-length line, or a single space, is a context
+                # line whose text is empty; "  " is a context line " "
                 body.pop()
             cur["hunks"].append(build_hunk(a, body))
             in_header = False
