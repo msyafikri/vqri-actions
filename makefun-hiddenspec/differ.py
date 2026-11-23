@@ -521,6 +521,9 @@ def main():
     ap.add_argument("--timeout", type=int, default=15)
     ap.add_argument("--no-minimize", action="store_true")
     args = ap.parse_args()
+    # Both implementations run with cwd=tempdir, so resolve their paths.
+    args.ref = os.path.abspath(args.ref)
+    args.engine = os.path.abspath(args.engine)
     ref_cmd = [sys.executable, args.ref]
     js_cmd = ["node", args.engine]
     outdir = args.out
