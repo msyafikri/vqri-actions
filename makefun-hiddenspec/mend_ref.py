@@ -866,15 +866,22 @@ def apply_v4a(tree, sections, strict, moves):
                     lines = lines[:ip] + mapped + lines[ip:]
                     cursor = ip + len(mapped)
                 else:
-                    tier, occ = first_tier(lines, old, strict, start=cursor)
+                    # end-of-file chunk: only occurrences ending at the
+                    # file's last line count, so the tier is the first
+                    # tier with such an occurrence (not the first tier
+                    # with any occurrence)
+                    tier = None
+                    pos = None
+                    for t in ([0] if strict else [0, 1, 2]):
+                        occ = occurrences(lines, old, t, start=cursor)
+                        cand = [p for p in occ
+                                if p + len(old) == len(lines)]
+                        if cand:
+                            tier, pos = t, cand[0]
+                            break
                     if tier is None:
                         failed = ("no-match", path)
                         break
-                    cand = [p for p in occ if p + len(old) == len(lines)]
-                    if not cand:
-                        failed = ("no-match", path)
-                        break
-                    pos = cand[0]
                     mapped = map_new_lines(lines, pos, old, new, tier)
                     lines = lines[:pos] + mapped + lines[pos + len(old):]
                     cursor = pos + len(mapped)
