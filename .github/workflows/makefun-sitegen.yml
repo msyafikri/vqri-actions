@@ -1,0 +1,114 @@
+name: makefun-sitegen
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "Candidate solve file to test (solve-v1.js .. solve-v4.js)"
+        required: true
+        default: "solve-v4.js"
+        type: string
+      bench_reps:
+        description: "Warm bench reps per case"
+        required: true
+        default: "7"
+        type: string
+      shards:
+        description: "Parallel fuzz shards (1-8)"
+        required: true
+        default: "4"
+        type: string
+      mutations:
+        description: "Mutations per fuzz shard"
+        required: true
+        default: "500"
+        type: string
+      gen_seeds:
+        description: "Fresh generated sets per fuzz shard"
+        required: true
+        default: "3"
+        type: string
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Node version (grader runs node22)
+        run: node --version
+      - name: Practice differential + bench (variant vs baseline)
+        working-directory: makefun-sitegen
+        run: |
+          export SITEGEN_VENDOR=./kit-subject/vendor/makefun-site
+          export SITEGEN_CASES=./kit-subject/practice/input/cases.json
+          node diff.mjs --candidate "./${{ inputs.variant }}" --bench --reps "${{ inputs.bench_reps }}" | tee bench-${{ inputs.variant }}.log
+      - name: Bench all variants (same box, same run)
+        working-directory: makefun-sitegen
+        run: |
+          for v in solve-v1.js solve-v2.js solve-v3.js solve-v4.js; do
+            echo "=== $v ==="
+            node bench-one.mjs "./$v" "${{ inputs.bench_reps }}" | tee -a bench-all.log
+          done
+          echo "=== baseline ==="
+          node bench-one.mjs ./kit-subject/vendor/makefun-site/index.js "${{ inputs.bench_reps }}" | tee -a bench-all.log || true
+      - name: Upload bench logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sitegen-bench-${{ inputs.variant }}
+          path: |
+            makefun-sitegen/bench-${{ inputs.variant }}.log
+            makefun-sitegen/bench-all.log
+          if-no-files-found: ignore
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: |
+          python3 - <<'PY'
+          import json, os
+          n = max(1, min(8, int("${{ inputs.shards }}")))
+          matrix = {"shard": [{"i": i} for i in range(n)]}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matrix=" + json.dumps(matrix) + "\n")
+          PY
+  fuzz:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Generate fresh sets (kit generator, shard seeds)
+        working-directory: makefun-sitegen
+        run: |
+          mkdir -p gen-sets-shard-${{ matrix.shard.i }}
+          for s in $(seq 1 "${{ inputs.gen_seeds }}"); do
+            SEED=$(node -e "const c=require('node:crypto'); console.log(c.createHash('sha256').update('sitegen-fleet-seed-shard${{ matrix.shard.i }}-n'+$s).digest('hex'))")
+            node kit-subject/generator/gen.mjs "$SEED" "gen-sets-shard-${{ matrix.shard.i }}/shard${{ matrix.shard.i }}-set$s.json"
+          done
+      - name: Fuzz shard ${{ matrix.shard.i }}
+        working-directory: makefun-sitegen
+        run: |
+          export SITEGEN_VENDOR=./kit-subject/vendor/makefun-site
+          export SITEGEN_CASES=./kit-subject/practice/input/cases.json
+          node fuzz.mjs --candidate "./${{ inputs.variant }}" --mutations "${{ inputs.mutations }}" --seed "${{ matrix.shard.i }}" --generated "./gen-sets-shard-${{ matrix.shard.i }}" --save-dir "./fuzz-failures-shard-${{ matrix.shard.i }}" | tee "fuzz-shard-${{ matrix.shard.i }}.log"
+          test ${PIPESTATUS[0]} -eq 0
+      - name: Upload fuzz log + any failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sitegen-fuzz-shard-${{ matrix.shard.i }}
+          path: |
+            makefun-sitegen/fuzz-shard-${{ matrix.shard.i }}.log
+            makefun-sitegen/fuzz-failures-shard-${{ matrix.shard.i }}
+          if-no-files-found: ignore
