@@ -73,6 +73,8 @@ def main():
             i += 1
     data = json.load(open(practice))
     checks = data["checks"]
+    # The reference runs with cwd=tempdir, so resolve its path first.
+    ref = os.path.abspath(ref)
     total = 0
     passed = 0
     fails = []
