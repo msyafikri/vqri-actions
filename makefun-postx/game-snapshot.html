@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GETAWAY HEAT — one prompt, one game</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; padding: 0; background: #050510; height: 100%; overflow: hidden; }
+  #game { display: block; width: 100vw; height: 100vh; }
+  #hint {
+    position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+    color: #7df9ff; font: 14px/1.4 monospace; letter-spacing: 2px;
+    opacity: .55; pointer-events: none; text-transform: uppercase;
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="1920" height="1080"></canvas>
+<div id="hint">Arrows / mouse to steer &nbsp;·&nbsp; Space = nitro &nbsp;·&nbsp; R = restart</div>
+<script>
+'use strict';
+/* GETAWAY HEAT — a neon top-down getaway driver.
+   One prompt: "Build a tiny browser game: GETAWAY HEAT, a neon top-down
+   getaway driver. Steer a glowing car with arrow keys or mouse, dodge
+   traffic, outrun police cars, grab cash bags, near-misses build a combo
+   multiplier. 3 lives, wanted stars rise as you score, 60-second rounds,
+   title screen, game over. Single HTML file, no network, canvas, neon style."
+   Pure core (GH) has no DOM dependency so it can be driven headless. */
+
+const W = 1920, H = 1080;
+const ROAD_L = 300, ROAD_R = 1620, LANES = 5;
+const LANE_W = (ROAD_R - ROAD_L) / LANES;
+const laneX = i => ROAD_L + LANE_W * (i + 0.5);
+const PLAYER_Y = 880;
+const ROUND_LEN = 60;          // seconds per round
+const START_LIVES = 3;
+const COMBO_MAX = 8, COMBO_WINDOW = 3.0;
+const NEAR_MISS_DX = 120;      // px: passing this close counts as near miss
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const TRAFFIC_COLORS = ['#ff2d95', '#ffd319', '#39ff6a', '#ff9f1c', '#b967ff', '#2de2ff'];
+
+function createState(seed) {
+  const rand = mulberry32(seed);
+  return {
+    seed, rand,
+    phase: 'title',           // title | playing | over
+    time: 0,                  // round clock (playing only)
+    timeLeft: ROUND_LEN,
+    score: 0, best: 0,
+    cash: 0, lives: START_LIVES,
+    combo: 1, comboT: 0,      // combo multiplier + seconds left on the chain
+    wanted: 1,                // 1..5 stars
+    player: { x: laneX(2), y: PLAYER_Y, vx: 0, inv: 0, nitro: 1, boosting: false },
+    traffic: [],              // {lane,x,y,w,h,speed,color,passed}
+    police: [],               // {x,y,speed,flash}
+    bags: [],                 // {x,y,taken}
+    parts: [],                // {x,y,vx,vy,life,maxLife,color,size}
+    shake: 0, roadOff: 0, speed: 0,
+    spawnT: 0, bagT: 0, policeT: 0,
+    dist: 0, nearMisses: 0, crashes: 0,
+    crashLog: [],               // {t, by, px, ox, oy} — why each life was lost
+    aiTarget: null,             // autopilot hysteresis: current target x
+    overReason: '', newBest: false,
+    msg: '', msgT: 0,
+  };
+}
+
+function wantedFor(score, cash) {
+  // Stars climb with score: 1 star under 1200, then +1 per 1200 up to 5.
+  return Math.min(5, 1 + Math.floor((score + cash * 2) / 1200));
+}
+
+function spawnTraffic(s) {
+  const lane = Math.floor(s.rand() * LANES);
+  // Never block every lane at once: cap simultaneous traffic per row band.
+  const near = s.traffic.filter(t => t.y < 240).length;
+  if (near >= 3) return;
+  const speed = 300 + s.rand() * 120 + s.wanted * 15;
+  s.traffic.push({
+    lane, x: laneX(lane), y: -140,
+    w: 96, h: 168, speed,
+    color: TRAFFIC_COLORS[Math.floor(s.rand() * TRAFFIC_COLORS.length)],
+    passed: false,
+  });
+}
+
+function spawnPolice(s) {
+  const lane = Math.max(0, Math.min(LANES - 1,
+    Math.round((s.player.x - ROAD_L) / LANE_W) + (s.rand() < 0.5 ? -1 : 1) * Math.floor(s.rand() * 2)));
+  s.police.push({ x: laneX(lane), y: -180, w: 100, h: 172, speed: 520 + s.wanted * 25, flash: 0 });
+}
+
+function spawnBag(s) {
+  const lane = Math.floor(s.rand() * LANES);
+  s.bags.push({ x: laneX(lane), y: -80, taken: false });
+}
+
+function burst(s, x, y, color, n, power) {
+  for (let i = 0; i < n; i++) {
+    const a = s.rand() * Math.PI * 2, v = (0.3 + s.rand() * 0.7) * power;
+    s.parts.push({
+      x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 60,
+      life: 0.5 + s.rand() * 0.6, maxLife: 1.1, color,
+      size: 3 + s.rand() * 7,
+    });
+  }
+}
+
+function crash(s) {
+  s.lives -= 1;
+  s.crashes += 1;
+  s.combo = 1; s.comboT = 0;
+  s.player.inv = 1.6;
+  s.shake = 26;
+  burst(s, s.player.x, s.player.y - 40, '#ff5b3d', 42, 520);
+  burst(s, s.player.x, s.player.y - 40, '#ffd319', 26, 380);
+  // The blast clears the road around the player: no chain-crash the
+  // instant invulnerability wears off.
+  const px = s.player.x, py = s.player.y;
+  s.traffic = s.traffic.filter(t => Math.abs(t.x - px) > 320 || Math.abs(t.y - py) > 320);
+  s.police = s.police.filter(q => Math.abs(q.x - px) > 320 || Math.abs(q.y - py) > 320);
+  if (s.lives <= 0) endRound(s, 'BUSTED — the heat got you');
+}
+
+function endRound(s, reason) {
+  s.phase = 'over';
+  s.overReason = reason;
+  s.newBest = s.score > s.best;
+  if (s.newBest) s.best = s.score;
+}
+
+/* ---------------- update ---------------- */
+
+function step(s, input, dt) {
+  if (s.phase !== 'playing') return;
+  dt = Math.min(dt, 0.05);
+  s.time += dt;
+  s.timeLeft = Math.max(0, ROUND_LEN - s.time);
+  if (s.timeLeft <= 0) { endRound(s, "TIME UP — you got away clean"); return; }
+
+  const p = s.player;
+  // Steering: keys or mouse target; smooth with velocity.
+  const steer = (input.left ? -1 : 0) + (input.right ? 1 : 0);
+  const targetX = input.mouseX != null ? input.mouseX : null;
+  if (targetX != null) {
+    const dx = targetX - p.x;
+    p.vx = Math.max(-1400, Math.min(1400, dx * 10));
+  } else {
+    p.vx += steer * 5200 * dt;
+    p.vx *= Math.pow(0.0001, dt); // snappy damping when no steer
+    if (!steer) p.vx *= Math.pow(0.02, dt);
+  }
+  p.boosting = !!input.boost && p.nitro > 0.05;
+  if (p.boosting) p.nitro = Math.max(0, p.nitro - dt * 0.45);
+  else p.nitro = Math.min(1, p.nitro + dt * 0.12);
+  p.x = Math.max(ROAD_L + 60, Math.min(ROAD_R - 60, p.x + p.vx * dt));
+  if (p.inv > 0) p.inv -= dt;
+
+  // World speed: base 620 + wanted pressure + nitro.
+  const baseSpeed = 620 + s.wanted * 45 + (p.boosting ? 380 : 0);
+  s.speed = baseSpeed;
+  s.roadOff = (s.roadOff + baseSpeed * dt) % 120;
+  s.dist += baseSpeed * dt;
+  s.score += Math.floor(baseSpeed * dt * 0.02 * (p.boosting ? 2 : 1));
+
+  // Combo decay.
+  if (s.comboT > 0) { s.comboT -= dt; if (s.comboT <= 0) s.combo = 1; }
+
+  // Spawns.
+  s.spawnT -= dt;
+  if (s.spawnT <= 0) {
+    if (s.traffic.length < 12) spawnTraffic(s);
+    s.spawnT = Math.max(0.45, 0.85 - s.wanted * 0.07 - (p.boosting ? 0.18 : 0)) * (0.7 + s.rand() * 0.6);
+  }
+  s.bagT -= dt;
+  if (s.bagT <= 0) { spawnBag(s); s.bagT = 1.6 + s.rand() * 2.2; }
+  s.policeT -= dt;
+  const policeInterval = Math.max(4, 9 - s.wanted * 1.2);
+  if (s.policeT <= 0 && s.wanted >= 2 && s.police.length < 2) { spawnPolice(s); s.policeT = policeInterval * (0.8 + s.rand() * 0.5); }
+
+  // Traffic: move down, near-miss + collision.
+  for (const t of s.traffic) {
+    t.y += (t.speed + baseSpeed * 0.45) * dt;
+    if (!t.passed && t.y > p.y + 120) {
+      t.passed = true;
+      const dx = Math.abs(t.x - p.x);
+      if (dx < NEAR_MISS_DX + 55 && dx > 70) {
+        s.nearMisses += 1;
+        s.combo = Math.min(COMBO_MAX, s.combo + 1);
+        s.comboT = COMBO_WINDOW;
+        const pts = 10 * s.combo;
+        s.score += pts;
+        s.msg = 'NEAR MISS +' + pts; s.msgT = 0.9;
+        burst(s, p.x, p.y - 60, '#7df9ff', 8, 200);
+      }
+    }
+  }
+  s.traffic = s.traffic.filter(t => t.y < H + 220);
+
+  // Police: faster, steer toward the player's x — but commit to their lane
+  // in the final approach so the player can always dodge.
+  for (const q of s.police) {
+    q.flash += dt;
+    q.y += (q.speed + baseSpeed * 0.35) * dt;
+    const dy = p.y - q.y;
+    if (dy > 220) {
+      const dx = p.x - q.x;
+      q.x += Math.max(-140, Math.min(140, dx * 1.6)) * dt;
+    }
+  }
+  s.police = s.police.filter(q => q.y < H + 240);
+
+  // Cash bags drift down; collect on touch.
+  for (const b of s.bags) {
+    b.y += baseSpeed * 0.8 * dt;
+    if (!b.taken && Math.abs(b.x - p.x) < 80 && Math.abs(b.y - p.y) < 90) {
+      b.taken = true;
+      s.cash += 1;
+      const pts = 100 * s.combo;
+      s.score += pts;
+      s.combo = Math.min(COMBO_MAX, s.combo + 1);
+      s.comboT = COMBO_WINDOW;
+      s.msg = 'CASH +$' + pts; s.msgT = 0.9;
+      burst(s, b.x, b.y, '#39ff6a', 14, 260);
+    }
+  }
+  s.bags = s.bags.filter(b => !b.taken && b.y < H + 120);
+
+  // Collisions (traffic + police) unless invulnerable.
+  if (p.inv <= 0) {
+    const hit = (o) => Math.abs(o.x - p.x) < 80 && Math.abs(o.y - p.y) < 120;
+    const ht = s.traffic.find(hit), hp = !ht && s.police.find(hit);
+    if (ht || hp) {
+      const o = ht || hp;
+      s.crashLog.push({ t: +s.time.toFixed(2), by: ht ? 'traffic' : 'police', px: Math.round(p.x), ox: Math.round(o.x), oy: Math.round(o.y) });
+      crash(s);
+    }
+  }
+
+  // Particles.
+  for (const pt of s.parts) {
+    pt.life -= dt; pt.x += pt.vx * dt; pt.y += pt.vy * dt; pt.vy += 300 * dt;
+  }
+  s.parts = s.parts.filter(pt => pt.life > 0);
+  if (s.shake > 0) s.shake = Math.max(0, s.shake - dt * 60);
+  if (s.msgT > 0) s.msgT -= dt;
+
+  s.wanted = wantedFor(s.score, s.cash);
+}
+
+/* ---------------- demo autopilot ----------------
+   Steers like a skilled player: picks the lane with the most clearance
+   among the threats ahead, grabs cash when the path is clear. */
+function aiInput(s) {
+  const p = s.player;
+  // Candidate targets: every lane centre plus a shoulder offset toward each
+  // neighbour (shoulders are where near-misses live: lane centres are 264px
+  // apart, so a car in the next lane is never a near-miss from a centre).
+  const cands = [];
+  for (let lane = 0; lane < LANES; lane++) {
+    const cx = laneX(lane);
+    cands.push(cx);
+    if (lane > 0) cands.push(cx - 110);
+    if (lane < LANES - 1) cands.push(cx + 110);
+  }
+  let bestX = p.x, bestScore = -Infinity;
+  const scoreOf = (x) => {
+    let score = 0;
+    for (const o of s.traffic.concat(s.police)) {
+      const dy = p.y - o.y;            // >0: object ahead of the player
+      if (dy < -160 || dy > 800) continue;
+      const dx = Math.abs(o.x - x);
+      if (dx < 110) score -= 1000 - Math.min(900, dy); // collision course: sooner = worse
+      else if (dx < 200 && dy > 0 && dy < 260) score += 60; // near-miss zone
+    }
+    for (const b of s.bags) {
+      if (!b.taken && b.y < p.y && b.y > p.y - 520 && Math.abs(b.x - x) < 80) score += 90;
+    }
+    score -= Math.abs(x - p.x) * 0.25; // smoothness: don't swerve far for nothing
+    return score;
+  };
+  for (const x of cands) {
+    if (x < ROAD_L + 60 || x > ROAD_R - 60) continue;
+    const score = scoreOf(x);
+    if (score > bestScore) { bestScore = score; bestX = x; }
+  }
+  // Hysteresis: hold the current target unless a new one is clearly better,
+  // so the car never dithers between shoulders into a threat's path.
+  if (s.aiTarget != null) {
+    const cur = scoreOf(s.aiTarget);
+    if (bestScore < cur + 60) bestX = s.aiTarget;
+  }
+  s.aiTarget = bestX;
+  const blocked = s.traffic.concat(s.police).some(
+    o => Math.abs(o.x - p.x) < 150 && p.y - o.y > 0 && p.y - o.y < 420);
+  return {
+    left: false, right: false,
+    mouseX: bestX,
+    boost: !blocked && p.nitro > 0.4,
+  };
+}
+
+/* ---------------- renderer ---------------- */
+
+function drawCar(ctx, x, y, w, h, color, opts) {
+  opts = opts || {};
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.shadowColor = color; ctx.shadowBlur = 26;
+  ctx.fillStyle = color;
+  roundRect(ctx, -w / 2, -h / 2, w, h, 18); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = 'rgba(5,5,16,0.85)';
+  roundRect(ctx, -w / 2 + 12, -h / 2 + 26, w - 24, 44, 8); ctx.fill();   // windshield
+  roundRect(ctx, -w / 2 + 12, h / 2 - 62, w - 24, 34, 8); ctx.fill();    // rear window
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.fillRect(-w / 2 + 8, -h / 2 - 6, 16, 10); ctx.fillRect(w / 2 - 24, -h / 2 - 6, 16, 10); // headlights
+  ctx.fillStyle = '#ff2d55';
+  ctx.fillRect(-w / 2 + 8, h / 2 - 4, 16, 8); ctx.fillRect(w / 2 - 24, h / 2 - 4, 16, 8);     // taillights
+  if (opts.police) {
+    const on = Math.floor(opts.flash * 6) % 2 === 0;
+    ctx.fillStyle = on ? '#ff2d55' : '#2d7dff';
+    ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = 30;
+    ctx.fillRect(-w / 2 + 14, -10, w / 2 - 14, 20);
+    ctx.fillStyle = on ? '#2d7dff' : '#ff2d55';
+    ctx.fillRect(0, -10, w / 2 - 14, 20);
+    ctx.shadowBlur = 0;
+  }
+  ctx.restore();
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawWorld(ctx, s) {
+  // Sky / city backdrop.
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#070716'); g.addColorStop(0.6, '#0a0a24'); g.addColorStop(1, '#12082b');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  // Stars.
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  for (let i = 0; i < 90; i++) {
+    const sx = (i * 613) % W, sy = (i * 997) % 420;
+    ctx.fillRect(sx, sy, 2, 2);
+  }
+
+  // City blocks left/right of the road, slow parallax.
+  for (const side of [0, 1]) {
+    const bx = side === 0 ? 0 : ROAD_R;
+    const bw = side === 0 ? ROAD_L : W - ROAD_R;
+    for (let i = 0; i < 7; i++) {
+      const by = ((i * 190 + s.roadOff * 0.35) % (H + 190)) - 190;
+      const bh = 150, bwid = bw - 36;
+      ctx.fillStyle = i % 2 ? '#0d0d26' : '#101030';
+      ctx.fillRect(bx + 18, by, bwid, bh);
+      ctx.fillStyle = 'rgba(125,249,255,0.16)';
+      for (let wy = 0; wy < 4; wy++)
+        for (let wx = 0; wx < 4; wx++)
+          if ((i * 7 + wy * 3 + wx) % 3) ctx.fillRect(bx + 30 + wx * ((bwid - 24) / 4), by + 14 + wy * 34, 16, 18);
+      ctx.fillStyle = 'rgba(255,45,149,0.5)';
+      ctx.fillRect(bx + 18, by, 4, bh);
+    }
+  }
+
+  // Road.
+  ctx.fillStyle = '#0b0b1e';
+  ctx.fillRect(ROAD_L, 0, ROAD_R - ROAD_L, H);
+  ctx.strokeStyle = 'rgba(255,45,149,0.85)'; ctx.lineWidth = 6;
+  ctx.shadowColor = '#ff2d95'; ctx.shadowBlur = 18;
+  ctx.beginPath(); ctx.moveTo(ROAD_L, 0); ctx.lineTo(ROAD_L, H); ctx.moveTo(ROAD_R, 0); ctx.lineTo(ROAD_R, H); ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 5;
+  ctx.setLineDash([46, 74]);
+  ctx.lineDashOffset = -s.roadOff;
+  for (let i = 1; i < LANES; i++) {
+    const x = ROAD_L + LANE_W * i;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+}
+
+function drawGame(ctx, s) {
+  ctx.save();
+  if (s.shake > 0) ctx.translate((Math.random() - 0.5) * s.shake, (Math.random() - 0.5) * s.shake);
+  drawWorld(ctx, s);
+
+  // Cash bags.
+  for (const b of s.bags) {
+    const bob = Math.sin((s.time * 6 + b.x) * 1.4) * 5;
+    ctx.save();
+    ctx.translate(b.x, b.y + bob);
+    ctx.shadowColor = '#39ff6a'; ctx.shadowBlur = 24;
+    ctx.fillStyle = '#0e3d1e';
+    ctx.beginPath(); ctx.arc(0, 0, 30, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = '#39ff6a'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(0, 0, 30, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = '#39ff6a';
+    ctx.font = 'bold 34px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('$', 0, 2);
+    ctx.restore();
+  }
+
+  // Traffic.
+  for (const t of s.traffic) drawCar(ctx, t.x, t.y, t.w, t.h, t.color);
+  // Police.
+  for (const q of s.police) drawCar(ctx, q.x, q.y, q.w, q.h, '#e8ecff', { police: true, flash: q.flash });
+
+  // Player (blink while invulnerable).
+  const p = s.player;
+  if (!(p.inv > 0 && Math.floor(p.inv * 10) % 2 === 0)) {
+    drawCar(ctx, p.x, p.y, 100, 176, '#22e6ff');
+    ctx.save();
+    ctx.translate(p.x, p.y + 96);
+    ctx.fillStyle = 'rgba(34,230,255,0.5)';
+    ctx.beginPath();
+    ctx.moveTo(-16, 0); ctx.lineTo(0, 44 + Math.random() * 22); ctx.lineTo(16, 0);
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+    if (p.boosting) {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 3;
+      for (let i = 0; i < 10; i++) {
+        const sx = ROAD_L + 40 + Math.random() * (ROAD_R - ROAD_L - 80);
+        const sy = Math.random() * H;
+        ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx, sy + 60 + Math.random() * 90); ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
+  // Particles.
+  for (const pt of s.parts) {
+    ctx.globalAlpha = Math.max(0, pt.life / pt.maxLife);
+    ctx.fillStyle = pt.color;
+    ctx.beginPath(); ctx.arc(pt.x, pt.y, pt.size, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  drawHUD(ctx, s);
+}
+
+function drawHUD(ctx, s) {
+  ctx.textBaseline = 'alphabetic';
+  // Score.
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#7df9ff';
+  ctx.font = 'bold 30px monospace';
+  ctx.fillText('SCORE ' + s.score, 40, 64);
+  ctx.fillStyle = 'rgba(255,255,255,0.65)';
+  ctx.font = '24px monospace';
+  ctx.fillText('BEST ' + s.best, 40, 100);
+  ctx.fillStyle = '#39ff6a';
+  ctx.font = 'bold 30px monospace';
+  ctx.fillText('CASH $' + s.cash, 40, 142);
+  // Timer bar.
+  const tw = 420;
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  ctx.fillRect(W / 2 - tw / 2, 36, tw, 16);
+  ctx.fillStyle = s.timeLeft < 10 ? '#ff2d55' : '#7df9ff';
+  ctx.fillRect(W / 2 - tw / 2, 36, tw * (s.timeLeft / ROUND_LEN), 16);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 28px monospace'; ctx.textAlign = 'center';
+  ctx.fillText(Math.ceil(s.timeLeft) + 's', W / 2, 88);
+  // Wanted stars.
+  ctx.textAlign = 'right';
+  ctx.font = '40px monospace';
+  let stars = '';
+  for (let i = 0; i < 5; i++) stars += i < s.wanted ? '★' : '☆';
+  ctx.fillStyle = '#ffd319';
+  ctx.fillText(stars, W - 40, 66);
+  ctx.fillStyle = 'rgba(255,255,255,0.65)';
+  ctx.font = '20px monospace';
+  ctx.fillText('WANTED', W - 40, 100);
+  // Lives.
+  ctx.fillStyle = '#ff2d55';
+  ctx.font = '34px monospace';
+  ctx.fillText('♥'.repeat(Math.max(0, s.lives)), W - 40, 150);
+  // Combo.
+  if (s.combo > 1) {
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#ff9f1c';
+    ctx.font = 'bold 44px monospace';
+    ctx.fillText('COMBO ×' + s.combo, W - 40, 220);
+    ctx.fillStyle = 'rgba(255,159,28,0.6)';
+    ctx.fillRect(W - 240, 232, 200 * (s.comboT / COMBO_WINDOW), 8);
+  }
+  // Nitro meter.
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(255,255,255,0.65)';
+  ctx.font = '20px monospace';
+  ctx.fillText('NITRO', 40, H - 56);
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  ctx.fillRect(40, H - 46, 200, 12);
+  ctx.fillStyle = '#22e6ff';
+  ctx.fillRect(40, H - 46, 200 * s.player.nitro, 12);
+  // Floating message.
+  if (s.msgT > 0) {
+    ctx.globalAlpha = Math.min(1, s.msgT / 0.4);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 44px monospace';
+    ctx.fillText(s.msg, W / 2, 300);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawTitle(ctx, s) {
+  drawWorld(ctx, s);
+  ctx.fillStyle = 'rgba(5,5,16,0.72)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#22e6ff'; ctx.shadowBlur = 42;
+  ctx.fillStyle = '#22e6ff';
+  ctx.font = 'bold 150px monospace';
+  ctx.fillText('GETAWAY HEAT', W / 2, 380);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#ff2d95';
+  ctx.font = 'bold 44px monospace';
+  ctx.fillText('dodge traffic  ·  outrun the cops  ·  grab the cash', W / 2, 470);
+  ctx.fillStyle = '#fff';
+  ctx.font = '32px monospace';
+  ctx.fillText('60 seconds  ·  3 lives  ·  best score ' + s.best, W / 2, 560);
+  if (Math.floor(performance.now() / 500) % 2 === 0) {
+    ctx.fillStyle = '#7df9ff';
+    ctx.font = 'bold 40px monospace';
+    ctx.fillText('PRESS SPACE OR CLICK TO PLAY', W / 2, 680);
+  }
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.font = '24px monospace';
+  ctx.fillText('arrows / mouse to steer  ·  space = nitro', W / 2, 760);
+}
+
+function drawOver(ctx, s) {
+  drawGame(ctx, s);
+  ctx.fillStyle = 'rgba(120,10,40,0.62)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#ff2d55'; ctx.shadowBlur = 40;
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 130px monospace';
+  ctx.fillText('GAME OVER', W / 2, 360);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#ffd319';
+  ctx.font = 'bold 56px monospace';
+  ctx.fillText('SCORE  ' + s.score + '   ·   BEST  ' + s.best, W / 2, 470);
+  if (s.newBest) {
+    ctx.fillStyle = '#39ff6a';
+    ctx.font = 'bold 44px monospace';
+    ctx.fillText('★ NEW BEST SCORE ★', W / 2, 550);
+  }
+  ctx.fillStyle = '#fff';
+  ctx.font = '32px monospace';
+  ctx.fillText(s.overReason + '  ·  cash $' + s.cash + '  ·  near misses ' + s.nearMisses, W / 2, 640);
+  if (Math.floor(performance.now() / 500) % 2 === 0) {
+    ctx.fillStyle = '#7df9ff';
+    ctx.font = 'bold 40px monospace';
+    ctx.fillText('PRESS R OR SPACE TO PLAY AGAIN', W / 2, 740);
+  }
+}
+
+/* ---------------- input, audio, boot ---------------- */
+
+const GH = { W, H, ROAD_L, ROAD_R, LANES, ROUND_LEN, createState, step, aiInput, wantedFor, laneX };
+
+if (typeof globalThis !== 'undefined') globalThis.GH = GH;
+
+if (typeof document !== 'undefined') (function () {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const params = new URLSearchParams(location.search);
+  const seed = parseInt(params.get('seed') || String((Math.random() * 1e9) | 0), 10);
+  const demo = params.get('demo') === '1' || params.get('autoplay') === '1';
+  const s = createState(seed);
+  try { s.best = parseInt(localStorage.getItem('getaway-heat-best') || '0', 10) || 0; } catch (e) { /* no storage */ }
+
+  const input = { left: false, right: false, boost: false, mouseX: null };
+  let audioCtx = null;
+  function blip(freq, dur, type, vol) {
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = type || 'square'; o.frequency.value = freq;
+      g.gain.setValueAtTime(vol || 0.05, audioCtx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + (dur || 0.08));
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(); o.stop(audioCtx.currentTime + (dur || 0.08));
+    } catch (e) { /* audio unavailable */ }
+  }
+  let lastCash = 0, lastNear = 0, lastLives = s.lives;
+  function soundTick() {
+    if (s.cash > lastCash) blip(880, 0.09, 'sine', 0.06);
+    if (s.nearMisses > lastNear) blip(1320, 0.06, 'triangle', 0.05);
+    if (s.lives < lastLives) blip(110, 0.3, 'sawtooth', 0.09);
+    lastCash = s.cash; lastNear = s.nearMisses; lastLives = s.lives;
+  }
+
+  function startRound() {
+    const keepBest = s.best;
+    const ns = createState((seed + Math.floor(Math.random() * 1e6)) | 0);
+    ns.best = keepBest;
+    Object.keys(ns).forEach(k => { s[k] = ns[k]; });
+    s.phase = 'playing';
+    lastCash = 0; lastNear = 0; lastLives = s.lives;
+  }
+
+  addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowLeft' || e.key === 'a') input.left = true;
+    if (e.key === 'ArrowRight' || e.key === 'd') input.right = true;
+    if (e.key === ' ' || e.key === 'ArrowUp') { input.boost = true; e.preventDefault(); }
+    if (s.phase !== 'playing' && (e.key === ' ' || e.key === 'Enter' || e.key === 'r' || e.key === 'R')) startRound();
+  });
+  addEventListener('keyup', (e) => {
+    if (e.key === 'ArrowLeft' || e.key === 'a') input.left = false;
+    if (e.key === 'ArrowRight' || e.key === 'd') input.right = false;
+    if (e.key === ' ') input.boost = false;
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    const r = canvas.getBoundingClientRect();
+    input.mouseX = (e.clientX - r.left) / r.width * W;
+  });
+  canvas.addEventListener('pointerdown', () => {
+    if (s.phase !== 'playing') startRound();
+  });
+
+  // Demo autopilot: title auto-starts, game over auto-restarts.
+  let demoOverT = 0;
+  function demoTick(dt) {
+    if (s.phase === 'title') startRound();
+    else if (s.phase === 'over') {
+      demoOverT += dt;
+      if (demoOverT > 2.2) { demoOverT = 0; startRound(); }
+    }
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    if (demo) {
+      demoTick(dt);
+      if (s.phase === 'playing') step(s, aiInput(s), dt);
+    } else if (s.phase === 'playing') {
+      step(s, input, dt);
+      soundTick();
+    }
+    if (s.phase === 'title') drawTitle(ctx, s);
+    else if (s.phase === 'over') drawOver(ctx, s);
+    else drawGame(ctx, s);
+    if (s.phase === 'over' && s.newBest) {
+      try { localStorage.setItem('getaway-heat-best', String(s.best)); } catch (e) { /* no storage */ }
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
